@@ -43,7 +43,7 @@ Metadata:
       TargetGroupName:
         default: Target group name
       HealthCheckPath:
-        default: Target group health check path (PLACEHOLDER)
+        default: Target group health check path
 
 Parameters:
   ProjectName:
@@ -69,13 +69,13 @@ Parameters:
     Description: Name of the target group.
     MaxLength: 32
 
-  # TODO(mmoa_web_app): PLACEHOLDER. The app should serve a dependency-free
-  # GET /health that returns 200 (as the car show apps do). Until it does,
-  # the target reports unhealthy and the ALB returns 502/503.
+  # mmoa_web_app serves GET /health as a dependency-free liveness check
+  # (200, no DB access, mounted before logging/sessions/maintenance mode), so
+  # a busy database or maintenance mode never pulls the target out of service.
   HealthCheckPath:
     Type: String
     Default: /health
-    Description: HTTP path the target group health check probes. PLACEHOLDER — confirm once mmoa_web_app is built.
+    Description: HTTP path the target group health check probes (mmoa_web_app GET /health).
 
 Resources:
 

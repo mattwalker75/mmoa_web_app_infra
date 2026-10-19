@@ -26,23 +26,28 @@ through cross-stack exports and imports. Region: `us-east-1`.
 
 ---
 
-## ⚠️ TODO: finish after mmoa_web_app is built
+## App contract (mmoa_web_app)
 
-The `mmoa_web_app` repo has no code yet, so the app-specific values below
-are **placeholders**. They have to be updated before this deploys a working
-app:
+These values come from the `mmoa_web_app` repo. If the app changes one of
+them, change it here too:
 
-| Placeholder | Where | Current default |
-|-------------|-------|-----------------|
-| App listen port | `c_security_groups` → `AppPort` (the ALB imports it from here) | `3001` |
+| Setting | Where in infra | Value |
+|---------|----------------|-------|
+| App listen port (`config.json` → `port`) | `c_security_groups` → `AppPort` (the ALB imports it) | `3004` |
 | SQLite setup script | `d_EC2_web_app` → `DbSetupScript` | `SETUP_SQLLITE_DB.sh` |
 | App start script | `d_EC2_web_app` → `StartScript` | `START_APP.sh` |
-| `config.json` edits for running behind the ALB (ssl off, publicBaseUrl, trustProxy) | `d_EC2_web_app` user data, `TODO(mmoa_web_app)` block | none yet |
+| Public URL baked into verification / reset links | `d_EC2_web_app` → `PublicBaseUrl` (optional; blank keeps `http://localhost:3004`) | blank |
 | Health check path | `e_ALB_mmoa` → `HealthCheckPath` | `/health` |
 
-User data runs the setup and start scripts only if they exist in the cloned
-repo. A deploy before the app exists still succeeds, but the app doesn't
-start and the ALB target stays unhealthy.
+The committed `config.json` already runs correctly behind the ALB (`server.ssl`
+false, `server.trustProxy` 1), so user data only edits `publicBaseUrl`. Change
+anything else afterwards from the admin console (Web App Settings), then
+restart the app from there.
+
+Email is not set up yet, so the committed config has
+`email.showLinksInBrowser: true`. With that on, verification and
+password-reset links are shown on screen instead of only being emailed.
+Turn it off once real email works.
 
 ---
 

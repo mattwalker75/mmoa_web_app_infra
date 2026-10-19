@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   mmoa - Security Groups for the web app EC2 and ALB
   - ALB SG allows inbound web traffic ( 80 and 443 )
-  - Web App SG allows inbound on the app port (PLACEHOLDER until mmoa_web_app is built)
+  - Web App SG allows inbound on the app port (3004)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -24,7 +24,7 @@ Metadata:
       ProjectName:
         default: Project name (used for tags, exports, and to import the VPC)
       AppPort:
-        default: Web application listen port (PLACEHOLDER)
+        default: Web application listen port
       AppSecurityGroupName:
         default: Web application security group name
       AlbSecurityGroupName:
@@ -42,16 +42,15 @@ Parameters:
     AllowedPattern: ^[a-z][a-z0-9-]*$
     ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
 
-  # TODO(mmoa_web_app): PLACEHOLDER. Set this to the real port once the
-  # mmoa_web_app repo decides it. This is the single source of truth: it is
-  # exported as ${ProjectName}-app-port and imported by e_ALB_mmoa (target
-  # group + target registration).
+  # Must match `port` in mmoa_web_app's config.json (3004). This is the single
+  # source of truth on the infra side: it is exported as ${ProjectName}-app-port
+  # and imported by e_ALB_mmoa (target group + target registration).
   AppPort:
     Type: Number
-    Default: 3001
+    Default: 3004
     MinValue: 1
     MaxValue: 65535
-    Description: TCP port the Node application listens on. PLACEHOLDER — update once mmoa_web_app is built.
+    Description: TCP port the Node application listens on (mmoa_web_app config.json "port").
 
   AppSecurityGroupName:
     Type: String
