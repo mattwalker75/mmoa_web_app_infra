@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - IAM Roles/Instance Profiles for EC2 instances
+  - mmoa_ec2_web_app is the Role for the mmoa_web_app EC2
+  - mmoa_ec2_adminconsole is the Role for the mmoa_admin_console EC2 (future)
+  - mmoa_admin_console is the managed policy the admin console uses to reach
+    the web app instance
+  - NEITHER role can create, modify, or delete AWS resources
+
+# ---------------------------------------------------------------------------
+# NO-PROVISIONING RULE
+# ---------------------------------------------------------------------------
+# Unlike myevent365 (whose control plane stands up / tears down customer
+# deployments), nothing in the mmoa project creates AWS resources at runtime.
+# So there is no "provisioning" policy here, and every grant below is either
+# read-only or SSM messaging:
+#   - AmazonSSMManagedInstanceCore: lets the instance register with SSM
+#     (Session Manager, Run Command target). It reports instance state to SSM
+#     and reads SSM documents/parameters; it cannot create EC2/ELB/IAM/etc.
+#   - mmoa_admin_console: ssm:SendCommand to the web app instance ONLY (by
+#     Name tag) plus read-only Describe/Get/List calls. Running a command on
+#     an existing instance does not create an AWS resource.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Web App Role
+        Parameters:
+          - WebAppRoleName
+      - Label:
+          default: Admin Console Role
+        Parameters:
+          - AdminConsoleRoleName
+          - WebAppInstanceName
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used in tags and exports)
+      WebAppRoleName:
+        default: Web App EC2 IAM role name
+      AdminConsoleRoleName:
+        default: Admin Console EC2 IAM role name
+      WebAppInstanceName:
+        default: Name tag of the web app instance the admin console may reach
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: Prefix used in tags and exports.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  WebAppRoleName:
+    Type: String
+    Default: mmoa_ec2_web_app
+    Description: Name for the Web App EC2 IAM role and matching instance profile.
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: ^[a-zA-Z0-9_+=,.@-]+$
+
+  AdminConsoleRoleName:
+    Type: String
+    Default: mmoa_ec2_adminconsole
+    Description: >
+      Name for the Admin Console EC2 IAM role and matching instance profile.
+      Nothing attaches it yet — the admin console does not run in AWS — but
+      it exists so the day the console moves onto an instance is a config
+      flip, not an IAM job.
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: ^[a-zA-Z0-9_+=,.@-]+$
+
+  WebAppInstanceName:
+    Type: String
+    Default: mmoa_web_app
+    Description: >
+      Name tag of the web app EC2 instance (must match WebAppInstanceName on
+      d_EC2_web_app). Scopes the admin console's ssm:SendCommand to that
+      instance only.
+
+Resources:
+
+  # ---------- Web App EC2 Role ----------
+  # SSM core only: Session Manager access with no SSH, and a Run Command
+  # target for the admin console. The app makes no AWS API calls of its own.
+  WebAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref WebAppRoleName
+      Description: Role assumed by the mmoa web app EC2 instance (SSM-managed; cannot create AWS resources).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Ref WebAppRoleName
+
+  # ---------- Instance Profile (what EC2 actually attaches) ----------
+  WebAppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref WebAppRoleName
+      Roles:
+        - !Ref WebAppRole
+
+  # ---------- Admin Console policy (managed, so it can be shared) ----------
+  # A managed policy rather than inline so it can ALSO be attached to the IAM
+  # user the admin console uses while it runs off-AWS
+  # (aws iam attach-user-policy), keeping that user least-privilege.
+  #
+  # Purpose: reach the web app instance over SSM for config, logs, and SQLite
+  # backups, and read enough EC2/ELB state to show instance + target health.
+  AdminConsolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}_admin_console
+      Description: Admin console access to the mmoa web app instance (SSM Run Command + read-only EC2/ELB). Cannot create AWS resources.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # --- SSM: run shell commands on the web app instance only ---
+          # SendCommand is authorized against BOTH the target instance and the
+          # document, so each gets its own statement.
+          - Sid: SsmSendToWebApp
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/Name: !Ref WebAppInstanceName
+          - Sid: SsmShellDocument
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript
+          # --- SSM: read command results / agent status ---
+          - Sid: SsmRead
+            Effect: Allow
+            Action:
+              - ssm:GetCommandInvocation
+              - ssm:ListCommands
+              - ssm:ListCommandInvocations
+              - ssm:DescribeInstanceInformation
+            Resource: '*'
+          # --- EC2 / ELBv2: read only (no resource-level scoping available) ---
+          - Sid: ReadOnlyDescribe
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetHealth
+            Resource: '*'
+
+  # ---------- Admin Console EC2 Role (future use) ----------
+  AdminConsoleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AdminConsoleRoleName
+      Description: Role for the mmoa Admin Console EC2 instance (reaches the web app over SSM; cannot create AWS resources).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Ref AdminConsolePolicy
+      Tags:
+        - Key: Name
+          Value: !Ref AdminConsoleRoleName
+
+  AdminConsoleInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref AdminConsoleRoleName
+      Roles:
+        - !Ref AdminConsoleRole
+
+Outputs:
+  WebAppRoleName:
+    Description: Web App EC2 IAM role name
+    Value: !Ref WebAppRole
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-role-name
+
+  WebAppRoleArn:
+    Description: Web App EC2 IAM role ARN
+    Value: !GetAtt WebAppRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-role-arn
+
+  WebAppInstanceProfileName:
+    Description: Instance profile name to attach to the web app EC2 instance
+    Value: !Ref WebAppInstanceProfile
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-instance-profile-name
+
+  WebAppInstanceProfileArn:
+    Description: Web App instance profile ARN
+    Value: !GetAtt WebAppInstanceProfile.Arn
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-instance-profile-arn
+
+  AdminConsolePolicyArn:
+    Description: Admin console policy (attach to the off-AWS admin console's IAM user)
+    Value: !Ref AdminConsolePolicy
+    Export:
+      Name: !Sub ${ProjectName}-admin-console-policy-arn
+
+  AdminConsoleRoleName:
+    Description: Admin Console EC2 IAM role name
+    Value: !Ref AdminConsoleRole
+    Export:
+      Name: !Sub ${ProjectName}-ec2-adminconsole-role-name
+
+  AdminConsoleInstanceProfileName:
+    Description: Instance profile name to attach to an Admin Console EC2 instance
+    Value: !Ref AdminConsoleInstanceProfile
+    Export:
+      Name: !Sub ${ProjectName}-ec2-adminconsole-instance-profile-name
+
+  AdminConsoleInstanceProfileArn:
+    Description: Admin Console instance profile ARN
+    Value: !GetAtt AdminConsoleInstanceProfile.Arn
+    Export:
+      Name: !Sub ${ProjectName}-ec2-adminconsole-instance-profile-arn

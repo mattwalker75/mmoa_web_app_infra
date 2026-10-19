@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - Web App ALB Load Balancer
+  - HTTP :80 forwards to the web app instance on the app port
+  - HTTPS :443 is NOT set up yet (no certificate) — planned change
+
+# ---------------------------------------------------------------------------
+# HTTP NOW, HTTPS LATER
+# ---------------------------------------------------------------------------
+# For now the ALB listens on :80 and FORWARDS to the target group (no
+# redirect, since there is no :443 listener to redirect to). Reach the app at
+# the ALB's AWS DNS name (LoadBalancerDnsName output).
+#
+# To move to HTTPS later (mirrors e_ALB_car_show / e_ALB_control_plane):
+#   1. Add a b_certificates stack (ACM cert for the mmoa domain) and a
+#      f_DNS_Records stack (Route53 alias -> this ALB).
+#   2. Add an HttpsListener on 443 with that cert, forwarding to TargetGroup.
+#   3. Change HttpListener's default action to the 301 redirect to HTTPS.
+# The ALB security group already allows 443.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Load Balancer
+        Parameters:
+          - AlbName
+      - Label:
+          default: Target Group
+        Parameters:
+          - TargetGroupName
+          - HealthCheckPath
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used for tags and to import shared resources)
+      AlbName:
+        default: ALB name
+      TargetGroupName:
+        default: Target group name
+      HealthCheckPath:
+        default: Target group health check path (PLACEHOLDER)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: >
+      Prefix used in tags and to import VPC, subnets, security groups, the app
+      port, and the web app EC2 instance ID from earlier stacks.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  AlbName:
+    Type: String
+    Default: mmoa-webapp-alb
+    Description: Name of the Application Load Balancer.
+    MaxLength: 32
+
+  TargetGroupName:
+    Type: String
+    Default: mmoa-webapp-tg
+    Description: Name of the target group.
+    MaxLength: 32
+
+  # TODO(mmoa_web_app): PLACEHOLDER. The app should serve a dependency-free
+  # GET /health that returns 200 (as the car show apps do). Until it does,
+  # the target reports unhealthy and the ALB returns 502/503.
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: HTTP path the target group health check probes. PLACEHOLDER — confirm once mmoa_web_app is built.
+
+Resources:
+
+  # ---------- Application Load Balancer ----------
+  # In the ALB inbound SG (80/443 from the world) AND the web app SG, so the
+  # app SG's self-ingress rule lets it reach the instance on the app port.
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref AlbName
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-1-id
+        - Fn::ImportValue: !Sub ${ProjectName}-public-subnet-2-id
+      SecurityGroups:
+        - Fn::ImportValue: !Sub ${ProjectName}-alb-sg-id
+        - Fn::ImportValue: !Sub ${ProjectName}-app-sg-id
+      Tags:
+        - Key: Name
+          Value: !Ref AlbName
+
+  # ---------- Target Group (registers the web app instance on the app port) ----------
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Ref TargetGroupName
+      TargetType: instance
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port:
+        Fn::ImportValue: !Sub ${ProjectName}-app-port
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id
+      IpAddressType: ipv4
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      Targets:
+        - Id:
+            Fn::ImportValue: !Sub ${ProjectName}-ec2-web-app-instance-id
+          Port:
+            Fn::ImportValue: !Sub ${ProjectName}-app-port
+      Tags:
+        - Key: Name
+          Value: !Ref TargetGroupName
+
+  # ---------- HTTP Listener (80) → forward to the web app ----------
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  LoadBalancerArn:
+    Description: ALB ARN
+    Value: !Ref LoadBalancer
+    Export:
+      Name: !Sub ${ProjectName}-alb-arn
+
+  LoadBalancerDnsName:
+    Description: ALB public DNS name (browse here until DNS is set up; future Route53 alias target)
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub ${ProjectName}-alb-dns-name
+
+  LoadBalancerCanonicalHostedZoneId:
+    Description: ALB canonical hosted zone ID (required for future Route53 A/AAAA alias records)
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub ${ProjectName}-alb-canonical-hosted-zone-id
+
+  TargetGroupArn:
+    Description: Target group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub ${ProjectName}-target-group-arn
+
+  HttpListenerArn:
+    Description: HTTP (:80) listener ARN
+    Value: !Ref HttpListener
+    Export:
+      Name: !Sub ${ProjectName}-http-listener-arn

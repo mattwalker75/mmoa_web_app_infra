@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - Web App EC2 instance
+  - It runs linux and is attached to the mmoa ALB
+  - This runs the mmoa_web_app (SQLite database on the instance)
+  - The instance role cannot create or modify other AWS resources
+
+# ---------------------------------------------------------------------------
+# TODO — FINISH AFTER mmoa_web_app IS BUILT
+# ---------------------------------------------------------------------------
+# The mmoa_web_app repo has no code yet, so the app-specific pieces of this
+# stack are PLACEHOLDERS. Once the app exists, come back and:
+#   1. Set the real app port (AppPort in c_security_groups — this stack does
+#      not hardcode it, the ALB imports it from there).
+#   2. Set DbSetupScript / StartScript below to the app's real script names.
+#   3. Fill in the "config.json edits" block in user data (ALB-terminated
+#      HTTP, publicBaseUrl, trustProxy, etc. — see d_EC2_control_plane in
+#      car_show_management_infra for the pattern).
+#   4. Confirm the health check path (e_ALB_mmoa HealthCheckPath).
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# SECURITY NOTE — GitHub credentials
+# ---------------------------------------------------------------------------
+# The GitHub Personal Access Token is parameterized with NoEcho and no default.
+# It must be supplied at deploy time, e.g.:
+#
+#   aws cloudformation deploy \
+#     --stack-name mmoa-ec2-web-app \
+#     --template-file templates/d_EC2_web_app.yaml \
+#     --parameter-overrides GitHubToken=ghp_xxx...
+#
+# Even with NoEcho, the token is interpolated into the EC2 user-data script,
+# which is visible to anyone with ec2:DescribeInstanceAttribute on the
+# instance. For production, store the token in AWS Secrets Manager and use
+# a dynamic reference (e.g. {{resolve:secretsmanager:...}}) instead.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Instance
+        Parameters:
+          - WebAppInstanceName
+          - InstanceType
+          - AmiId
+          - KeyPairName
+      - Label:
+          default: Storage
+        Parameters:
+          - RootVolumeSizeGiB
+          - RootVolumeType
+      - Label:
+          default: Application
+        Parameters:
+          - WebAppUserId
+          - GitHubId
+          - WebAppRepoUrl
+          - GitHubToken
+          - DbSetupScript
+          - StartScript
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used for tags and to import shared resources)
+      AmiId:
+        default: AMI ID (defaults to latest Amazon Linux 2023 x86_64)
+      KeyPairName:
+        default: EC2 key pair name
+      RootVolumeSizeGiB:
+        default: Root EBS volume size (GiB)
+      RootVolumeType:
+        default: Root EBS volume type
+      GitHubId:
+        default: GitHub username for cloning the application repo
+      GitHubToken:
+        default: GitHub Personal Access Token (NoEcho)
+      WebAppInstanceName:
+        default: Web App EC2 instance Name tag
+      InstanceType:
+        default: Web App EC2 instance type
+      WebAppUserId:
+        default: Local OS user that owns and runs the web app
+      WebAppRepoUrl:
+        default: Web App repo URL (without scheme)
+      DbSetupScript:
+        default: SQLite setup script in the repo (PLACEHOLDER)
+      StartScript:
+        default: App start script in the repo (PLACEHOLDER)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: >
+      Prefix used in tags and to import VPC, subnet, SG, and instance profile
+      from earlier stacks. Must match the ProjectName used in those stacks.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >
+      SSM public parameter resolving to the latest Amazon Linux 2023 x86_64 AMI.
+      Override only if you need a pinned AMI ID.
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: My_Event_365_SSH_keys
+    Description: >
+      EC2 key pair for SSH access. Note: instance is in a private subnet so
+      direct SSH is not reachable; use SSM Session Manager via the attached
+      instance profile.
+
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 8
+    MinValue: 8
+    MaxValue: 1024
+    Description: Size of the root EBS volume in GiB (also holds the SQLite database).
+
+  RootVolumeType:
+    Type: String
+    Default: gp3
+    AllowedValues:
+      - gp3
+      - gp2
+
+  GitHubId:
+    Type: String
+    Default: mattwalker75
+    Description: GitHub username used to authenticate the git clone.
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      GitHub Personal Access Token used to clone the web app repo. Required.
+      For production, prefer a Secrets Manager dynamic reference instead of a
+      plain parameter.
+    MinLength: 1
+
+  WebAppInstanceName:
+    Type: String
+    Default: mmoa_web_app
+    Description: >
+      Name tag applied to the web app EC2 instance. Must match
+      WebAppInstanceName on b_IAM — the admin console's SSM access is scoped
+      to this tag.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: EC2 instance type for the web app ("small for now").
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+
+  WebAppUserId:
+    Type: String
+    Default: mmoa
+    Description: Local OS user created on the web app instance to own and run the app.
+    AllowedPattern: ^[a-z_][a-z0-9_-]*$
+
+  WebAppRepoUrl:
+    Type: String
+    Default: github.com/mattwalker75/mmoa_web_app.git
+    Description: Web App repo URL (without https:// prefix; protocol is added in user data).
+
+  # TODO(mmoa_web_app): PLACEHOLDER script names. User data runs each one only
+  # if it exists in the cloned repo, so a deploy before the app is built still
+  # completes (it just does not start anything).
+  DbSetupScript:
+    Type: String
+    Default: SETUP_SQLLITE_DB.sh
+    Description: SQLite DB setup script at the repo root, run once before first start. PLACEHOLDER.
+    AllowedPattern: ^[A-Za-z0-9_.-]+$
+
+  StartScript:
+    Type: String
+    Default: START_APP.sh
+    Description: App start script at the repo root (npm install + build + detached start). PLACEHOLDER.
+    AllowedPattern: ^[A-Za-z0-9_.-]+$
+
+Resources:
+
+  # ---------- Web App EC2 Instance ----------
+  # Uses the web app instance profile (mmoa_ec2_web_app — SSM core only, no
+  # resource-creation rights), the web app security group, and clones the
+  # mmoa_web_app repo. Lands in private subnet 1, managed via SSM Session
+  # Manager (no public IP, no inbound SSH).
+  #
+  # DATABASE: SQLite — same engine and layout as car_show_control_plane:
+  # a <name>.db file at the repo root, built from setup_sqlite_db.sql by
+  # SETUP_SQLLITE_DB.sh, selected by database.engine = "sqlite" in config.json.
+  # That setup script WIPES any existing .db before rebuilding, which is only
+  # safe here because user data runs once, on first boot — never re-run it by
+  # hand on a live instance.
+  #
+  # The DB sits on the root EBS volume, which is DeleteOnTermination, so it
+  # lives only as long as the instance. The regular backups (pulled by the
+  # admin console over SSM, AWS-RunShellScript — see b_IAM) are what make it
+  # durable.
+  WebAppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId:
+        Fn::ImportValue: !Sub ${ProjectName}-private-subnet-1-id
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub ${ProjectName}-app-sg-id
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub ${ProjectName}-ec2-web-app-instance-profile-name
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: !Ref RootVolumeType
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Ref WebAppInstanceName
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/usr/bin/bash
+            #
+            #  Setup Instance to run the mmoa WEB APP application
+            #  (SQLite database, local to this instance).
+            #
+
+            GITHUB_KEY="${GitHubToken}"
+            GITHUB_ID="${GitHubId}"
+            REPO="${WebAppRepoUrl}"
+            APP_ID="${WebAppUserId}"
+            APP_DIR="mmoa_web_app"
+            DB_SETUP_SCRIPT="${DbSetupScript}"
+            START_SCRIPT="${StartScript}"
+
+            if [ $(whoami) != "root" ]
+            then
+               echo "You need to run this script as root"
+               echo "Usage:  sudo ./$0"
+               exit 255
+            fi
+
+            echo "You are Root"
+            echo "Starting OS update"
+            yum update -y
+            if (( $? == 0 ))
+            then
+               echo "Successfully finished OS update"
+            else
+               echo "Error with OS update"
+            fi
+
+            # git to clone; gcc-c++/make in case the sqlite3 npm module has to
+            # compile from source (it normally installs a prebuilt binary);
+            # sqlite provides the sqlite3 CLI (DB setup + backups).
+            echo "Installing extra yum software packages"
+            for package in git gcc-c++ make sqlite
+            do
+               yum install ${!package} -y
+            done
+            echo "Finished installing yum packages"
+
+            echo "Create application ID"
+            useradd -m ${!APP_ID}
+
+            echo "Downloading and setting up NodeJS"
+            su - ${!APP_ID} -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash"
+            su - ${!APP_ID} -c "nvm install --lts"
+
+            echo "Download application code"
+            su - ${!APP_ID} -c "git clone https://$GITHUB_ID:$GITHUB_KEY@$REPO"
+            echo "Finished download application code"
+
+            # TODO(mmoa_web_app): config.json edits for running behind the ALB
+            # go here once the app's config exists. Expected, by analogy with
+            # the car show control plane:
+            #   - ssl = false (the ALB forwards plain HTTP to the app port)
+            #   - publicBaseUrl = the public URL users hit
+            #   - trustProxy = 1 (client IP / protocol from the ALB headers)
+            # e.g.
+            # su - ${!APP_ID} -c "cd $APP_DIR; sed -i 's|\"ssl\": true|\"ssl\": false|' config.json"
+
+            # Build the SQLite DB before the app starts. Skipped (with a
+            # message) while the repo has no setup script yet.
+            if [ -f "/home/$APP_ID/$APP_DIR/$DB_SETUP_SCRIPT" ]
+            then
+               echo "Setting up the SQLite database"
+               su - ${!APP_ID} -c "cd $APP_DIR; ./$DB_SETUP_SCRIPT"
+            else
+               echo "PLACEHOLDER: $DB_SETUP_SCRIPT not found in $APP_DIR — skipping DB setup"
+            fi
+
+            if [ -f "/home/$APP_ID/$APP_DIR/$START_SCRIPT" ]
+            then
+               echo "Change over to the following ID:  ${!APP_ID}"
+               echo "Run the following command:  cd $APP_DIR; nohup ./$START_SCRIPT &"
+               su - ${!APP_ID} -c "cd $APP_DIR; nohup ./$START_SCRIPT &"
+            else
+               echo "PLACEHOLDER: $START_SCRIPT not found in $APP_DIR — app NOT started"
+            fi
+
+Outputs:
+  WebAppInstanceId:
+    Description: Web App EC2 instance ID
+    Value: !Ref WebAppInstance
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-instance-id
+
+  WebAppPrivateIp:
+    Description: Private IPv4 address of the web app instance
+    Value: !GetAtt WebAppInstance.PrivateIp
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-private-ip
+
+  WebAppPrivateDnsName:
+    Description: Private DNS name of the web app instance
+    Value: !GetAtt WebAppInstance.PrivateDnsName
+    Export:
+      Name: !Sub ${ProjectName}-ec2-web-app-private-dns

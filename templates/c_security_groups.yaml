@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - Security Groups for the web app EC2 and ALB
+  - ALB SG allows inbound web traffic ( 80 and 443 )
+  - Web App SG allows inbound on the app port (PLACEHOLDER until mmoa_web_app is built)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Web Application
+        Parameters:
+          - AppPort
+          - AppSecurityGroupName
+      - Label:
+          default: Load Balancer
+        Parameters:
+          - AlbSecurityGroupName
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used for tags, exports, and to import the VPC)
+      AppPort:
+        default: Web application listen port (PLACEHOLDER)
+      AppSecurityGroupName:
+        default: Web application security group name
+      AlbSecurityGroupName:
+        default: ALB inbound security group name
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: >
+      Prefix used in tags and exports. Must match the ProjectName used in the
+      network stack so the VPC export can be imported.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  # TODO(mmoa_web_app): PLACEHOLDER. Set this to the real port once the
+  # mmoa_web_app repo decides it. This is the single source of truth: it is
+  # exported as ${ProjectName}-app-port and imported by e_ALB_mmoa (target
+  # group + target registration).
+  AppPort:
+    Type: Number
+    Default: 3001
+    MinValue: 1
+    MaxValue: 65535
+    Description: TCP port the Node application listens on. PLACEHOLDER — update once mmoa_web_app is built.
+
+  AppSecurityGroupName:
+    Type: String
+    Default: mmoa_ec2_web_app_sg
+    Description: Name tag for the web application security group.
+
+  AlbSecurityGroupName:
+    Type: String
+    Default: mmoa_alb_inbound_sg
+    Description: Name tag for the ALB inbound security group.
+
+Resources:
+
+  # ---------- Web Application Security Group (EC2 / Node app) ----------
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref AppSecurityGroupName
+      GroupDescription: Application security group for the mmoa web app EC2 instance.
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Ref AppSecurityGroupName
+
+  # Self-reference rule must live in a separate resource (CFN can't reference
+  # a SG from inside its own SecurityGroupIngress block). The ALB is made a
+  # member of this group (see e_ALB_mmoa), so this rule is what lets the ALB
+  # reach the instance on the app port.
+  AppSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+      Description: Allow app-port traffic from members of the same security group
+
+  # ---------- ALB Inbound Security Group ----------
+  # 443 is opened now even though the ALB only listens on 80 today, so the
+  # switch to HTTPS is a listener change only.
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref AlbSecurityGroupName
+      GroupDescription: Inbound security group for the public ALB (HTTP + HTTPS).
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-vpc-id
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from anywhere
+      Tags:
+        - Key: Name
+          Value: !Ref AlbSecurityGroupName
+
+Outputs:
+  AppSecurityGroupId:
+    Description: Web application security group ID
+    Value: !Ref AppSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-app-sg-id
+
+  AlbSecurityGroupId:
+    Description: ALB inbound security group ID
+    Value: !Ref AlbSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-alb-sg-id
+
+  AppPort:
+    Description: Web application listen port
+    Value: !Ref AppPort
+    Export:
+      Name: !Sub ${ProjectName}-app-port
