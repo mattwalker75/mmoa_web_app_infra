@@ -3,19 +3,29 @@ Description: >
   mmoa - Web App EC2 instance
   - It runs linux and is attached to the mmoa ALB
   - This runs the mmoa_web_app (SQLite database on the instance)
+  - User data clones, configures, and starts the app, and installs a daily
+    SQLite backup; a systemd unit brings the app back after a reboot
   - The instance role cannot create or modify other AWS resources
 
 # ---------------------------------------------------------------------------
 # APP CONTRACT (mmoa_web_app)
 # ---------------------------------------------------------------------------
-# The committed config.json is already shaped for running behind the ALB:
-# port 3004 (= AppPort in c_security_groups), server.ssl false (the ALB
-# forwards plain HTTP), server.trustProxy 1, database.engine sqlite
-# (mmoa_web_app.db), email.transport console. The only per-environment edit
-# user data makes is publicBaseUrl (PublicBaseUrl below), which is baked into
-# emailed / on-screen verification and reset links. Everything else is
-# changed later from the admin console (Web App Settings), then restarted.
+# User data clones the repo to /home/<WebAppUserId>/mmoa_web_app (the path
+# the admin console's ec2.appPath expects) and seds the committed config.json
+# into shape before the first start:
+#   port              = AppPort imported from c_security_groups (3004) — the
+#                       ALB target group registers the instance on that port
+#   server.ssl        = false   (the ALB forwards plain HTTP)
+#   server.trustProxy = 1       (client IPs come from X-Forwarded-For)
+#   database.engine   = sqlite  (mmoa_web_app.db next to app.js, WAL mode)
+#   aws.runningInAws  = true    (SES, when it is turned on, uses the instance
+#                               profile — no static keys on disk)
+#   publicBaseUrl     = PublicBaseUrl (only when the parameter is non-blank)
+# Everything else is changed later from the admin console (Web App Settings),
+# followed by a restart from its power bar.
 # Health check: GET /health (e_ALB_mmoa HealthCheckPath).
+# sqlite3 CLI: the admin console queries the DB over SSM with `sqlite3 -json`,
+# which needs sqlite3 >= 3.33. Amazon Linux 2023's `sqlite` package is 3.40+.
 # ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
@@ -27,12 +37,21 @@ Description: >
 #   aws cloudformation deploy \
 #     --stack-name mmoa-ec2-web-app \
 #     --template-file templates/d_EC2_web_app.yaml \
-#     --parameter-overrides GitHubToken=ghp_xxx...
+#     --parameter-overrides GitHubToken=github_pat_xxx...
+#
+# Use a FINE-GRAINED token scoped to the one repository
+# (mattwalker75/mmoa_web_app) with read-only "Contents" permission — that is
+# all a clone needs. The token is used once, in the clone URL; user data never
+# echoes it and strips it from the clone's .git/config right after the clone,
+# so it is not left on disk in the working tree (a later `git pull` must
+# supply a token again — see the README).
 #
 # Even with NoEcho, the token is interpolated into the EC2 user-data script,
 # which is visible to anyone with ec2:DescribeInstanceAttribute on the
-# instance. For production, store the token in AWS Secrets Manager and use
-# a dynamic reference (e.g. {{resolve:secretsmanager:...}}) instead.
+# instance (and cloud-init keeps a copy under /var/lib/cloud/). Revoke the
+# token after a successful deploy, or for production store it in AWS Secrets
+# Manager and use a dynamic reference (e.g. {{resolve:secretsmanager:...}})
+# instead.
 # ---------------------------------------------------------------------------
 
 Metadata:
@@ -61,9 +80,14 @@ Metadata:
           - GitHubId
           - WebAppRepoUrl
           - GitHubToken
+          - NodeVersion
           - DbSetupScript
           - StartScript
           - PublicBaseUrl
+      - Label:
+          default: Backups
+        Parameters:
+          - BackupRetentionDays
     ParameterLabels:
       ProjectName:
         default: Project name (used for tags and to import shared resources)
@@ -87,20 +111,25 @@ Metadata:
         default: Local OS user that owns and runs the web app
       WebAppRepoUrl:
         default: Web App repo URL (without scheme)
+      NodeVersion:
+        default: Node.js version installed with nvm
       DbSetupScript:
         default: SQLite setup script in the repo
       StartScript:
         default: App start script in the repo
       PublicBaseUrl:
         default: Public URL users reach the site at (optional)
+      BackupRetentionDays:
+        default: Days of daily SQLite backups to keep on the instance
 
 Parameters:
   ProjectName:
     Type: String
     Default: mmoa
     Description: >
-      Prefix used in tags and to import VPC, subnet, SG, and instance profile
-      from earlier stacks. Must match the ProjectName used in those stacks.
+      Prefix used in tags and to import VPC, subnet, SG, app port, and
+      instance profile from earlier stacks. Must match the ProjectName used
+      in those stacks.
     MinLength: 2
     MaxLength: 32
     AllowedPattern: ^[a-z][a-z0-9-]*$
@@ -111,7 +140,8 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: >
       SSM public parameter resolving to the latest Amazon Linux 2023 x86_64 AMI.
-      Override only if you need a pinned AMI ID.
+      Override only if you need a pinned AMI ID. Keep it an AL2023 image:
+      user data relies on dnf/yum, systemd, and AL2023's sqlite 3.40+ package.
 
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
@@ -126,7 +156,7 @@ Parameters:
     Default: 8
     MinValue: 8
     MaxValue: 1024
-    Description: Size of the root EBS volume in GiB (also holds the SQLite database).
+    Description: Size of the root EBS volume in GiB (also holds the SQLite database and its daily backups).
 
   RootVolumeType:
     Type: String
@@ -145,6 +175,7 @@ Parameters:
     NoEcho: true
     Description: >
       GitHub Personal Access Token used to clone the web app repo. Required.
+      Fine-grained, read-only Contents on mattwalker75/mmoa_web_app only.
       For production, prefer a Secrets Manager dynamic reference instead of a
       plain parameter.
     MinLength: 1
@@ -170,13 +201,28 @@ Parameters:
   WebAppUserId:
     Type: String
     Default: mmoa
-    Description: Local OS user created on the web app instance to own and run the app.
+    Description: >
+      Local OS user created on the web app instance to own and run the app.
+      The app is cloned to /home/<user>/mmoa_web_app; the admin console's
+      ec2.appPath / ec2.runAsUser must match.
     AllowedPattern: ^[a-z_][a-z0-9_-]*$
 
   WebAppRepoUrl:
     Type: String
     Default: github.com/mattwalker75/mmoa_web_app.git
     Description: Web App repo URL (without https:// prefix; protocol is added in user data).
+
+  # Node is installed per-user with nvm (same as car_show_management_infra).
+  # Pinned to a major rather than `--lts` so a new LTS line (e.g. Node 26)
+  # can't silently land outside what the app's Angular build supports
+  # (Angular 21: Node ^20.19 || ^22.12 || ^24). 24 is the LTS line the car
+  # show instance got from `nvm install --lts`.
+  NodeVersion:
+    Type: String
+    Default: '24'
+    Description: Node.js version for nvm install (a major like 24, or major.minor). Must be >= 20.19.
+    AllowedPattern: ^[0-9]+(\.[0-9]+){0,2}$
+    ConstraintDescription: A version number such as 24 or 22.12.
 
   # Script names at the mmoa_web_app repo root. User data runs each one only
   # if it exists in the cloned repo, so a wrong name fails soft (logged).
@@ -189,19 +235,28 @@ Parameters:
   StartScript:
     Type: String
     Default: START_APP.sh
-    Description: App start script at the repo root (npm install + SPA build + detached start, logs to logs/app.log).
+    Description: App start script at the repo root (npm install + SPA build + detached start, logs to logs/app.log). Also what the systemd unit runs at boot.
     AllowedPattern: ^[A-Za-z0-9_.-]+$
 
   # Blank keeps the committed http://localhost:3004 — fine for a first
-  # bring-up, but verification / reset links will point there. Set it to the
-  # ALB DNS name (http://<LoadBalancerDnsName>) or the real domain, here or
-  # later from the admin console (Web App Settings → General).
+  # bring-up, but verification / reset links and Open Graph URLs will point
+  # there. The ALB DNS name isn't known yet when this stack deploys (the ALB
+  # stack imports this instance), so either pass the real domain here or set
+  # it later from the admin console (Web App Settings → General) and restart.
   PublicBaseUrl:
     Type: String
     Default: ''
-    Description: Optional. Sets publicBaseUrl in config.json, e.g. http://mmoa-webapp-alb-123.us-east-1.elb.amazonaws.com
+    Description: Optional. Sets publicBaseUrl in config.json, e.g. http://mmoa-webapp-alb-123.us-east-1.elb.amazonaws.com or https://www.example.org
     AllowedPattern: ^(https?://[A-Za-z0-9.:-]+)?$
     ConstraintDescription: Blank, or http(s)://host[:port] with no path.
+
+  # The daily on-instance snapshot (see the backup section of user data).
+  BackupRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 365
+    Description: How many days of daily SQLite .backup snapshots to keep in /home/<user>/backups on the instance.
 
 Resources:
 
@@ -211,6 +266,22 @@ Resources:
   # mmoa_web_app repo. Lands in private subnet 1, managed via SSM Session
   # Manager (no public IP, no inbound SSH).
   #
+  # USER DATA (first boot only; output in /var/log/cloud-init-output.log):
+  #   1. OS update; install git, gcc-c++, make (native npm modules) and
+  #      sqlite (the sqlite3 CLI — DB setup, the admin console's -json
+  #      queries, and the daily .backup).
+  #   2. Create the app user, install Node via nvm as that user.
+  #   3. Clone the repo as the app user using the PAT once, then scrub the
+  #      token from .git/config.
+  #   4. sed config.json (port, ssl, trustProxy, engine, runningInAws,
+  #      publicBaseUrl), chmod 600, verify it still parses.
+  #   5. Run the SQLite setup script (builds mmoa_web_app.db).
+  #   6. Install the systemd units: <ProjectName>-web-app.service (runs the
+  #      repo's START/STOP scripts, so the app comes back after a reboot and
+  #      the admin console's power bar keeps working), plus the daily backup
+  #      service + timer.
+  #   7. Enable + start both; wait for GET /health on the app port.
+  #
   # DATABASE: SQLite — same engine and layout as car_show_control_plane:
   # a <name>.db file at the repo root, built from setup_sqlite_db.sql by
   # SETUP_SQLLITE_DB.sh, selected by database.engine = "sqlite" in config.json.
@@ -218,10 +289,15 @@ Resources:
   # safe here because user data runs once, on first boot — never re-run it by
   # hand on a live instance.
   #
-  # The DB sits on the root EBS volume, which is DeleteOnTermination, so it
-  # lives only as long as the instance. The regular backups (pulled by the
-  # admin console over SSM, AWS-RunShellScript — see b_IAM) are what make it
-  # durable.
+  # The app opens the DB in WAL journal mode, so the live data is spread over
+  # mmoa_web_app.db plus the -wal / -shm sidecars: a plain `cp` of the .db
+  # file is NOT a consistent backup. The daily timer therefore uses sqlite3's
+  # online `.backup`, which writes one consistent file while the app runs.
+  #
+  # The DB (and those local snapshots) sit on the root EBS volume, which is
+  # DeleteOnTermination, so they live only as long as the instance. The
+  # admin console's regular backups (pulled over SSM, AWS-RunShellScript —
+  # see b_IAM) are what make the data durable off-box.
   WebAppInstance:
     Type: AWS::EC2::Instance
     Properties:
@@ -245,87 +321,269 @@ Resources:
           Value: !Ref WebAppInstanceName
       UserData:
         Fn::Base64:
-          Fn::Sub: |
-            #!/usr/bin/bash
-            #
-            #  Setup Instance to run the mmoa WEB APP application
-            #  (SQLite database, local to this instance).
-            #
+          # List form of Fn::Sub so the app port can come from the
+          # c_security_groups export (the single source of truth the ALB
+          # target group also imports). ${!x} is a literal shell ${x}.
+          Fn::Sub:
+            - |
+              #!/usr/bin/bash
+              #
+              #  Setup Instance to run the mmoa WEB APP application
+              #  (SQLite database, local to this instance).
+              #
+              #  Runs once, on first boot (cloud-init); output lands in
+              #  /var/log/cloud-init-output.log. The GitHub token is used for
+              #  the clone only: it is never echoed, and it is scrubbed from
+              #  the clone's .git/config as soon as the clone finishes.
+              #
 
-            GITHUB_KEY="${GitHubToken}"
-            GITHUB_ID="${GitHubId}"
-            REPO="${WebAppRepoUrl}"
-            APP_ID="${WebAppUserId}"
-            APP_DIR="mmoa_web_app"
-            DB_SETUP_SCRIPT="${DbSetupScript}"
-            START_SCRIPT="${StartScript}"
-            PUBLIC_BASE_URL="${PublicBaseUrl}"
+              GITHUB_KEY="${GitHubToken}"
+              GITHUB_ID="${GitHubId}"
+              REPO="${WebAppRepoUrl}"
+              APP_ID="${WebAppUserId}"
+              APP_DIR="mmoa_web_app"
+              APP_HOME="/home/$APP_ID/$APP_DIR"
+              APP_PORT="${AppPort}"
+              NODE_VERSION="${NodeVersion}"
+              DB_SETUP_SCRIPT="${DbSetupScript}"
+              START_SCRIPT="${StartScript}"
+              PUBLIC_BASE_URL="${PublicBaseUrl}"
+              SERVICE_NAME="${ProjectName}-web-app"
+              BACKUP_SCRIPT="/usr/local/sbin/$SERVICE_NAME-backup.sh"
+              BACKUP_DIR="/home/$APP_ID/backups"
 
-            if [ $(whoami) != "root" ]
-            then
-               echo "You need to run this script as root"
-               echo "Usage:  sudo ./$0"
-               exit 255
-            fi
+              if [ $(whoami) != "root" ]
+              then
+                 echo "You need to run this script as root"
+                 echo "Usage:  sudo ./$0"
+                 exit 255
+              fi
 
-            echo "You are Root"
-            echo "Starting OS update"
-            yum update -y
-            if (( $? == 0 ))
-            then
-               echo "Successfully finished OS update"
-            else
-               echo "Error with OS update"
-            fi
+              echo "You are Root"
+              echo "Starting OS update"
+              yum update -y
+              if (( $? == 0 ))
+              then
+                 echo "Successfully finished OS update"
+              else
+                 echo "Error with OS update"
+              fi
 
-            # git to clone; gcc-c++/make in case the sqlite3 npm module has to
-            # compile from source (it normally installs a prebuilt binary);
-            # sqlite provides the sqlite3 CLI (DB setup + backups).
-            echo "Installing extra yum software packages"
-            for package in git gcc-c++ make sqlite
-            do
-               yum install ${!package} -y
-            done
-            echo "Finished installing yum packages"
+              # git to clone; gcc-c++/make in case the sqlite3 or bcrypt npm
+              # modules have to compile from source (they normally install a
+              # prebuilt binary); sqlite provides the sqlite3 CLI (DB setup,
+              # the admin console's `sqlite3 -json` queries, daily backups).
+              echo "Installing extra yum software packages"
+              for package in git gcc-c++ make sqlite
+              do
+                 yum install ${!package} -y
+              done
+              echo "Finished installing yum packages"
 
-            echo "Create application ID"
-            useradd -m ${!APP_ID}
+              # The admin console needs sqlite3 >= 3.33 (-json output).
+              # AL2023 ships 3.40+; this only shouts if the AMI was changed.
+              SQLITE_VER="$(sqlite3 --version 2>/dev/null | awk '{print $1}')"
+              echo "sqlite3 CLI version: $SQLITE_VER"
+              if [ "$(printf '%s\n' 3.33.0 "$SQLITE_VER" | sort -V | head -n1)" != "3.33.0" ]
+              then
+                 echo "WARNING: sqlite3 $SQLITE_VER is older than 3.33 — the admin console's -json queries will fail on this host"
+              fi
 
-            echo "Downloading and setting up NodeJS"
-            su - ${!APP_ID} -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash"
-            su - ${!APP_ID} -c "nvm install --lts"
+              echo "Create application ID"
+              useradd -m $APP_ID
 
-            echo "Download application code"
-            su - ${!APP_ID} -c "git clone https://$GITHUB_ID:$GITHUB_KEY@$REPO"
-            echo "Finished download application code"
+              echo "Downloading and setting up NodeJS $NODE_VERSION (nvm, as $APP_ID)"
+              su - $APP_ID -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash"
+              su - $APP_ID -c "nvm install $NODE_VERSION && nvm alias default $NODE_VERSION"
+              su - $APP_ID -c "echo node \$(node --version) npm \$(npm --version)"
 
-            # config.json already ships ALB-ready (ssl false, trustProxy 1,
-            # port 3004). Only publicBaseUrl is environment-specific; the
-            # parameter's AllowedPattern keeps it sed-safe (no | or quotes).
-            if [ -n "$PUBLIC_BASE_URL" ]
-            then
-               echo "Setting publicBaseUrl to $PUBLIC_BASE_URL"
-               su - ${!APP_ID} -c "cd $APP_DIR; sed -i 's|\"publicBaseUrl\": \"http://localhost:3004\"|\"publicBaseUrl\": \"$PUBLIC_BASE_URL\"|' config.json"
-            fi
+              # Clone as the app user. The token rides in the clone URL just
+              # once; git would otherwise keep that URL in .git/config, so the
+              # remote is rewritten to the plain URL right after.
+              echo "Download application code"
+              su - $APP_ID -c "git clone https://$GITHUB_ID:$GITHUB_KEY@$REPO $APP_DIR"
+              if [ ! -d "$APP_HOME/.git" ]
+              then
+                 echo "ERROR: git clone of $REPO failed — app NOT installed (check the GitHubToken parameter)"
+                 exit 1
+              fi
+              su - $APP_ID -c "cd $APP_DIR; git remote set-url origin https://$REPO"
+              unset GITHUB_KEY
+              echo "Finished download application code"
 
-            # Build the SQLite DB before the app starts (START_APP.sh would
-            # also auto-create it on a fresh boot; this keeps it explicit).
-            if [ -f "/home/$APP_ID/$APP_DIR/$DB_SETUP_SCRIPT" ]
-            then
-               echo "Setting up the SQLite database"
-               su - ${!APP_ID} -c "cd $APP_DIR; ./$DB_SETUP_SCRIPT"
-            else
-               echo "WARNING: $DB_SETUP_SCRIPT not found in $APP_DIR — skipping DB setup"
-            fi
+              # Shape the committed config.json for this instance. Top-level
+              # keys sit at a 2-space indent, so the '^  ' anchors keep the
+              # nested mysql/smtp "port" keys out of reach. PublicBaseUrl's
+              # AllowedPattern keeps it sed-safe (no | or quotes).
+              echo "Updating config.json for this instance (port $APP_PORT, ALB-terminated TLS, sqlite)"
+              CFG="$APP_HOME/config.json"
+              sed -i -E "s|^  \"port\": [0-9]+|  \"port\": $APP_PORT|" "$CFG"
+              sed -i -E 's|"ssl": true|"ssl": false|' "$CFG"
+              sed -i -E 's|"trustProxy": [^,}]+|"trustProxy": 1|' "$CFG"
+              sed -i -E 's|"engine": "[a-z]+"|"engine": "sqlite"|' "$CFG"
+              # SES (when email is switched on) then uses the instance profile.
+              sed -i -E 's|"runningInAws": false|"runningInAws": true|' "$CFG"
+              if [ -n "$PUBLIC_BASE_URL" ]
+              then
+                 echo "Setting publicBaseUrl to $PUBLIC_BASE_URL"
+                 sed -i -E "s|^  \"publicBaseUrl\": \"[^\"]*\"|  \"publicBaseUrl\": \"$PUBLIC_BASE_URL\"|" "$CFG"
+              fi
+              chown $APP_ID:$APP_ID "$CFG"
+              chmod 600 "$CFG"
+              if su - $APP_ID -c "cd $APP_DIR; node -e \"require('./config.json')\""
+              then
+                 echo "config.json is valid JSON after edits"
+              else
+                 echo "ERROR: config.json is not valid JSON after edits — the app will not start"
+              fi
 
-            if [ -f "/home/$APP_ID/$APP_DIR/$START_SCRIPT" ]
-            then
-               echo "Change over to the following ID:  ${!APP_ID}"
-               echo "Run the following command:  cd $APP_DIR; nohup ./$START_SCRIPT &"
-               su - ${!APP_ID} -c "cd $APP_DIR; nohup ./$START_SCRIPT &"
-            else
-               echo "WARNING: $START_SCRIPT not found in $APP_DIR — app NOT started"
-            fi
+              # Build the SQLite DB before the app starts (START_APP.sh would
+              # also auto-create it on a fresh boot; this keeps it explicit).
+              if [ -f "$APP_HOME/$DB_SETUP_SCRIPT" ]
+              then
+                 echo "Setting up the SQLite database"
+                 su - $APP_ID -c "cd $APP_DIR; ./$DB_SETUP_SCRIPT"
+              else
+                 echo "WARNING: $DB_SETUP_SCRIPT not found in $APP_DIR — skipping DB setup"
+              fi
+
+              # systemd unit for the app. It delegates to the repo's own
+              # START/STOP scripts (which detach `node app.js` and track it
+              # by PID file + port) instead of supervising node directly, so
+              # the admin console's Start / Stop / Restart (the same scripts,
+              # over SSM) and this unit never fight over the process. oneshot
+              # + RemainAfterExit = "run START once at boot, run STOP at
+              # shutdown". The login shell (-l) puts nvm's node on PATH, the
+              # same way the console's `su - $APP_ID -c` does.
+              echo "Installing systemd unit $SERVICE_NAME.service"
+              cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+              [Unit]
+              Description=MMoA web app ($APP_DIR) via its START/STOP scripts
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              User=$APP_ID
+              WorkingDirectory=$APP_HOME
+              ExecStart=/usr/bin/bash -lc ./$START_SCRIPT
+              ExecStop=/usr/bin/bash -lc ./STOP_APP.sh
+              # The first start also runs npm install + the Angular build.
+              TimeoutStartSec=1800
+              TimeoutStopSec=30
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+
+              # Daily consistent SQLite snapshot. The DB runs in WAL mode, so
+              # copying mmoa_web_app.db alone misses whatever is still in the
+              # -wal file; sqlite3's online .backup writes one consistent
+              # file while the app keeps running. AL2023 has no cron by
+              # default, hence a systemd timer. Snapshots older than
+              # BackupRetentionDays are pruned.
+              echo "Installing daily SQLite backup ($BACKUP_SCRIPT + $SERVICE_NAME-backup.timer)"
+              cat > "$BACKUP_SCRIPT" <<'EOF'
+              #!/usr/bin/bash
+              # Daily consistent snapshot of the mmoa_web_app SQLite database.
+              # Installed by mmoa_web_app_infra (d_EC2_web_app.yaml user data)
+              # and run by the <project>-web-app-backup.timer as the app user.
+              #
+              # The database runs in WAL mode, so a plain cp of the .db file is
+              # NOT a valid backup (recent writes live in the -wal sidecar).
+              # sqlite3's online .backup produces a single consistent file
+              # while the app keeps running. Run it by hand any time:
+              #   sudo systemctl start ${ProjectName}-web-app-backup.service
+              set -u
+              DB_FILE="/home/${WebAppUserId}/mmoa_web_app/mmoa_web_app.db"
+              BACKUP_DIR="/home/${WebAppUserId}/backups"
+              KEEP_DAYS="${BackupRetentionDays}"
+
+              mkdir -p "$BACKUP_DIR"
+              chmod 700 "$BACKUP_DIR"
+              if [ ! -f "$DB_FILE" ]
+              then
+                 echo "no database at $DB_FILE — nothing to back up"
+                 exit 0
+              fi
+
+              OUT="$BACKUP_DIR/mmoa_web_app-$(date +%F).db"
+              TMP="$OUT.part"
+              rm -f "$TMP"
+              if sqlite3 -cmd ".timeout 5000" "$DB_FILE" ".backup '$TMP'"
+              then
+                 mv -f "$TMP" "$OUT"
+                 chmod 600 "$OUT"
+                 echo "backup written: $OUT ($(du -h "$OUT" | cut -f1))"
+              else
+                 rm -f "$TMP"
+                 echo "backup FAILED for $DB_FILE" >&2
+                 exit 1
+              fi
+
+              # Prune snapshots older than KEEP_DAYS days.
+              find "$BACKUP_DIR" -maxdepth 1 -type f -name 'mmoa_web_app-*.db' -mtime +"$KEEP_DAYS" -print -delete | sed 's|^|pruned: |'
+              EOF
+              chmod 755 "$BACKUP_SCRIPT"
+              su - $APP_ID -c "mkdir -p $BACKUP_DIR && chmod 700 $BACKUP_DIR"
+
+              cat > /etc/systemd/system/$SERVICE_NAME-backup.service <<EOF
+              [Unit]
+              Description=Daily SQLite .backup of the MMoA web app database
+
+              [Service]
+              Type=oneshot
+              User=$APP_ID
+              ExecStart=$BACKUP_SCRIPT
+              EOF
+
+              # 09:00 UTC = 03:00 / 04:00 in Anna, TX. Persistent=true runs a
+              # missed slot (instance was stopped) at the next boot.
+              cat > /etc/systemd/system/$SERVICE_NAME-backup.timer <<EOF
+              [Unit]
+              Description=Run $SERVICE_NAME-backup.service daily
+
+              [Timer]
+              OnCalendar=*-*-* 09:00:00 UTC
+              Persistent=true
+              RandomizedDelaySec=600
+
+              [Install]
+              WantedBy=timers.target
+              EOF
+
+              systemctl daemon-reload
+              systemctl enable --now $SERVICE_NAME-backup.timer
+
+              # Start the app through the unit (this is also what runs after
+              # a reboot). START_APP.sh folds in npm install + SPA build + a
+              # detached start, so the first run takes a few minutes; its
+              # output is in `journalctl -u $SERVICE_NAME` and the app's own
+              # log in $APP_HOME/logs/app.log.
+              if [ -f "$APP_HOME/$START_SCRIPT" ]
+              then
+                 echo "Enabling and starting $SERVICE_NAME.service (runs ./$START_SCRIPT as $APP_ID)"
+                 systemctl enable --now $SERVICE_NAME.service
+                 systemctl --no-pager status $SERVICE_NAME.service || true
+                 echo "Waiting for GET /health on port $APP_PORT"
+                 for i in $(seq 1 30)
+                 do
+                    if curl -sf "http://127.0.0.1:$APP_PORT/health" > /dev/null
+                    then
+                       echo "App is up: GET /health returned 200"
+                       break
+                    fi
+                    sleep 2
+                 done
+                 curl -s "http://127.0.0.1:$APP_PORT/health" || echo "WARNING: /health did not answer — check journalctl -u $SERVICE_NAME and $APP_HOME/logs/app.log"
+                 echo
+              else
+                 echo "WARNING: $START_SCRIPT not found in $APP_DIR — app NOT started"
+              fi
+              echo "User data finished"
+            - AppPort:
+                Fn::ImportValue: !Sub ${ProjectName}-app-port
 
 Outputs:
   WebAppInstanceId:
@@ -345,3 +603,7 @@ Outputs:
     Value: !GetAtt WebAppInstance.PrivateDnsName
     Export:
       Name: !Sub ${ProjectName}-ec2-web-app-private-dns
+
+  WebAppServiceName:
+    Description: systemd unit that starts/stops the app on the instance (also <name>-backup.timer for the daily SQLite snapshot)
+    Value: !Sub ${ProjectName}-web-app.service
