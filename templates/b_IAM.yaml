@@ -164,6 +164,9 @@ Resources:
               - elasticloadbalancing:DescribeLoadBalancers
               - elasticloadbalancing:DescribeTargetGroups
               - elasticloadbalancing:DescribeTargetHealth
+              # Lets the console tell http from https on the ALB for its
+              # "Open website" link (optional; without it the link is http).
+              - elasticloadbalancing:DescribeListeners
             Resource: '*'
 
   # ---------- Admin Console EC2 Role (future use) ----------
