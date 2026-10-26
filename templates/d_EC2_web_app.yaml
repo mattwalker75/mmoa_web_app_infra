@@ -79,11 +79,11 @@ Metadata:
           - WebAppUserId
           - GitHubId
           - WebAppRepoUrl
-          - GitHubToken
           - NodeVersion
           - DbSetupScript
           - StartScript
           - PublicBaseUrl
+          - GitHubToken
       - Label:
           default: Backups
         Parameters:
