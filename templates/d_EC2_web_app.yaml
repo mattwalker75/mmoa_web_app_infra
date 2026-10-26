@@ -369,12 +369,13 @@ Resources:
                  echo "Error with OS update"
               fi
 
-              # git to clone; gcc-c++/make in case the sqlite3 or bcrypt npm
-              # modules have to compile from source (they normally install a
-              # prebuilt binary); sqlite provides the sqlite3 CLI (DB setup,
-              # the admin console's `sqlite3 -json` queries, daily backups).
+              # git to clone; gcc-c++/make/python3 to compile the sqlite3 npm
+              # driver — its prebuilt binary needs glibc 2.38, newer than
+              # AL2023's 2.34, so START_APP.sh compiles it on first start;
+              # sqlite provides the sqlite3 CLI (DB setup, the admin console's
+              # `sqlite3 -json` queries, daily backups).
               echo "Installing extra yum software packages"
-              for package in git gcc-c++ make sqlite
+              for package in git gcc-c++ make python3 sqlite
               do
                  yum install ${!package} -y
               done
