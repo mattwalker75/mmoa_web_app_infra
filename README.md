@@ -66,7 +66,7 @@ user data already sets `aws.runningInAws: true`, so no keys go on disk.)
 
 ```
                  Internet
-                    │  HTTP :80   (HTTPS :443 later)
+                    │  HTTP :80   (HTTPS :443 + missionmenofanna.com: see "Domain, HTTPS and email")
                     ▼
         ┌──────────────────────────┐
         │ mmoa-webapp-alb          │
@@ -94,15 +94,20 @@ depend on each other.
 
 | File | What it provisions | Depends on |
 |------|--------------------|------------|
+| [`a_DNS_base.yaml`](templates/a_DNS_base.yaml) | Route53 hosted zone for `missionmenofanna.com` with the records the domain has at GoDaddy today: Microsoft 365 (MX, verification + SPF TXT, `autodiscover` / `email` / `msoid` CNAMEs), Teams (`lyncdiscover` / `sip` CNAMEs, two SRVs) and, until cutover, the old GoDaddy site at the apex + `www` (`LegacyWebsiteIps`). **Deployed**, unlike the car show's reference-only copy | none |
+| [`b_certificates.yaml`](templates/b_certificates.yaml) | One ACM certificate, `missionmenofanna.com` + SAN `www.missionmenofanna.com`, DNS-validated in the zone; exports `mmoa-certificate-arn` | `a_DNS_base` **and** the nameserver switch |
+| [`b_SES.yaml`](templates/b_SES.yaml) | SES domain identity (Easy DKIM, RSA 2048), MAIL FROM `mail.missionmenofanna.com`, and its records: 3 DKIM CNAMEs, MAIL FROM MX + SPF, `_dmarc` (`p=none`) | `a_DNS_base` **and** the nameserver switch |
 | [`b_network.yaml`](templates/b_network.yaml) | Small VPC `10.1.0.0/24`, 2 public + 2 private `/26` subnets across `us-east-1a/b`, IGW, single NAT Gateway in AZ1, route tables | none |
 | [`b_IAM.yaml`](templates/b_IAM.yaml) | `mmoa_ec2_web_app` role/profile (SSM core only). `mmoa_admin_console` **managed policy** (SSM Run Command to the instance tagged `mmoa_web_app` + read-only EC2/ELB). `mmoa_ec2_adminconsole` role/profile (SSM core + that policy). That role isn't attached to anything yet because the console runs off-AWS; attach the managed policy to the console's IAM user with `aws iam attach-user-policy` | none |
 | [`c_security_groups.yaml`](templates/c_security_groups.yaml) | Web app SG `mmoa_ec2_web_app_sg` (self-ingress on `AppPort`) and ALB SG `mmoa_alb_inbound_sg` (80/443 from `0.0.0.0/0`) | `b_network` |
 | [`d_EC2_web_app.yaml`](templates/d_EC2_web_app.yaml) | `mmoa_web_app`: single `t3.small` AL2023 instance, `8 GiB gp3` root, private subnet 1, SSM-managed. User data clones + configures + starts the app, installs `mmoa-web-app.service` (restart on reboot) and `mmoa-web-app-backup.timer` (daily SQLite snapshot) | `b_IAM`, `b_network`, `c_security_groups` |
-| [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTP:80 listener **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check) | `b_network`, `c_security_groups`, `d_EC2_web_app` |
+| [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTP:80 listener **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check). HTTPS :443 not added yet | `b_network`, `c_security_groups`, `d_EC2_web_app` |
+| [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB. **The cutover**: deploy last, after HTTPS works | `a_DNS_base` (legacy records removed), `e_ALB_mmoa` |
 
-There are no `b_certificates`, `b_SES` or `f_DNS_Records` stacks yet,
-because there's no domain, HTTPS or email so far. Reach the app at the ALB's
-`LoadBalancerDnsName` output.
+`b_certificates`, `b_SES` and `f_DNS_Records` take the zone as a
+`HostedZoneId` **parameter** (the `HostedZoneId` output of `a_DNS_base`), the
+same way the car show stacks do. Until the domain is live, reach the app at
+the ALB's `LoadBalancerDnsName` output.
 
 ---
 
@@ -314,16 +319,71 @@ are the durable copy.**
 
 ---
 
-## Moving to HTTPS later
+## Domain, HTTPS and email (missionmenofanna.com)
 
-1. Add `b_certificates` (ACM cert for the mmoa domain) and `f_DNS_Records`
-   (Route53 alias → `mmoa-alb-dns-name`), modeled on
-   `car_show_management_infra`.
-2. In `e_ALB_mmoa`, add a 443 listener with that cert forwarding to the
+The domain is registered at GoDaddy and today serves a GoDaddy Website
+Builder site plus Microsoft 365 email. The move keeps email working the
+whole time and switches the site over only once HTTPS is ready.
+
+**Why that order matters:** the old site sends
+`Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`.
+Any browser that has visited it will load this domain **only over https**
+for up to two years (the domain is not on the browsers' preload list, so it
+only affects past visitors). Pointing the domain at an http-only ALB would
+look broken to them.
+
+1. **Zone.** Deploy `a_DNS_base` with its defaults. The new zone answers
+   exactly like GoDaddy does today (email records + the old site).
+   ```bash
+   aws cloudformation deploy --stack-name mmoa-dns-base --template-file a_DNS_base.yaml
+   aws cloudformation describe-stacks --stack-name mmoa-dns-base \
+     --query "Stacks[0].Outputs" --output table   # HostedZoneId + HostedZoneNameServers
+   ```
+2. **Nameservers.** At GoDaddy, replace the domain's nameservers with the four
+   `HostedZoneNameServers`. Wait until `dig NS missionmenofanna.com` shows the
+   `awsdns-*` servers (minutes to 48 hours). Email and the old site keep
+   working throughout. Transferring the *registration* away from GoDaddy is
+   separate and can happen any time later.
+3. **Certificate and SES** (both need step 2 live):
+   ```bash
+   aws cloudformation deploy --stack-name mmoa-certificates --template-file b_certificates.yaml \
+     --parameter-overrides HostedZoneId=<zone id>
+   aws cloudformation deploy --stack-name mmoa-ses --template-file b_SES.yaml \
+     --parameter-overrides HostedZoneId=<zone id>
+   ```
+   The certificate stack waits until ACM validates (a few minutes once DNS
+   has moved).
+4. **HTTPS on the ALB.** In `e_ALB_mmoa`, add a 443 listener with the
+   certificate (`Fn::ImportValue: mmoa-certificate-arn`) forwarding to the
    target group, and change the :80 listener to a 301 redirect to HTTPS.
-   The ALB SG already allows 443.
-3. Set the app's `publicBaseUrl` to `https://…` (from the admin console, or
-   `PublicBaseUrl` on a fresh deploy of the EC2 stack) and restart.
+   The ALB SG already allows 443. Check `https://<LoadBalancerDnsName>` answers
+   (the browser will warn that the name doesn't match the certificate —
+   expected until step 5).
+5. **Cutover.** Update `a_DNS_base` with `LegacyWebsiteIps` **blank** (removes
+   the old site's apex A and `www` CNAME), then immediately deploy
+   `f_DNS_Records` (apex + `www` → the ALB):
+   ```bash
+   aws cloudformation deploy --stack-name mmoa-dns-base --template-file a_DNS_base.yaml \
+     --parameter-overrides LegacyWebsiteIps=""
+   aws cloudformation deploy --stack-name mmoa-dns-records --template-file f_DNS_Records.yaml \
+     --parameter-overrides HostedZoneId=<zone id>
+   ```
+6. **App settings** (Admin Console → Web App Settings), then restart:
+   `publicBaseUrl` = `https://missionmenofanna.com` (links in emails and the
+   Facebook / Open Graph share tags). Refresh an event link once in
+   Facebook's Sharing Debugger.
+7. **Email from the app.** Add a `ses:SendEmail` grant scoped to the
+   `mmoa-ses-identity-arn` identity to the `mmoa_ec2_web_app` role in
+   `b_IAM` (as `car_show_management_infra/b_IAM`'s `SesSend` does) and
+   redeploy it. Make sure the account has SES production access (it is per
+   account + region; in the sandbox SES only sends to verified addresses).
+   Then set `email.transport` = `ses`, `email.from` = e.g.
+   `noreply@missionmenofanna.com`, restart, send yourself a password reset —
+   and once it arrives, turn **`email.showLinksInBrowser` off**.
+
+Not carried over from GoDaddy: `_domainconnect` (GoDaddy's own helper).
+There is no CAA record, which lets ACM issue the certificate. SES owns the
+`_dmarc` record (there was none); Microsoft 365 keeps the apex MX and SPF.
 
 ---
 
@@ -343,3 +403,6 @@ are the durable copy.**
   units `mmoa-web-app.service`, `mmoa-web-app-backup.service` /
   `.timer`, script `/usr/local/sbin/mmoa-web-app-backup.sh`
 - ALB: `mmoa-webapp-alb`, `mmoa-webapp-tg`
+- DNS / TLS / email: hosted zone `missionmenofanna.com`, certificate
+  `mmoa-web-app-cert`, SES identity `missionmenofanna.com` with MAIL FROM
+  `mail.missionmenofanna.com`

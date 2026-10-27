@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - Route53 hosted zone for missionmenofanna.com
+  - Recreates the records the domain has at GoDaddy today so email keeps
+    working when the nameservers move: Microsoft 365 (MX, verification +
+    SPF TXT, autodiscover / email / msoid CNAMEs) and Teams (lyncdiscover /
+    sip CNAMEs, two SRVs)
+  - Optionally keeps the old GoDaddy Website Builder site answering at the
+    apex and www until the web app takes over (LegacyWebsiteIps)
+  - DNS registrar is GoDaddy (until the registration is transferred)
+
+# ---------------------------------------------------------------------------
+# UNLIKE car_show_management_infra/a_DNS_base (reference only — that zone was
+# made by hand), THIS STACK IS MEANT TO BE DEPLOYED: it creates the zone.
+# The other stacks (b_certificates, b_SES, f_DNS_Records) take the zone as a
+# HostedZoneId PARAMETER, the same way the car show stacks do — paste the
+# HostedZoneId output of this stack into them.
+#
+# Defaults = what public DNS showed for missionmenofanna.com on 2026-10-26
+# (nameservers ns13/ns14.domaincontrol.com). Every record parameter is
+# optional: leave one blank and its record is not created.
+#
+# Not carried over: _domainconnect (GoDaddy's own "Domain Connect" helper —
+# meaningless once DNS is in Route53). No CAA record exists today, which
+# lets ACM issue the certificate.
+#
+# CUTOVER ORDER (see README → "Domain, HTTPS and email"):
+#   1. Deploy this stack with the defaults (LegacyWebsiteIps set). The new
+#      zone answers exactly like GoDaddy does today.
+#   2. At GoDaddy, replace the nameservers with the 4 in the
+#      HostedZoneNameServers output. Email and the old site keep working
+#      through the switch. Propagation: minutes to 48 hours.
+#   3. Deploy b_certificates (validates through this zone) and b_SES, add
+#      the HTTPS listener to e_ALB_mmoa.
+#   4. Update THIS stack with LegacyWebsiteIps blank (removes the apex A and
+#      www CNAME), then deploy f_DNS_Records straight away (apex + www →
+#      the ALB). Step 4 must come after HTTPS works: the old site sends a
+#      2-year HSTS header (includeSubDomains), so browsers that visited it
+#      will only ever load this domain over https.
+#
+# NOTE: After this stack creates the hosted zone, AWS generates 4 Name Server
+# (NS) records. Copy those into the domain registrar so the registrar
+# delegates DNS to Route53. DNS propagation can take anywhere from
+# 2 to 48 hours to complete worldwide.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+          - DomainName
+      - Label:
+          default: Common DNS Settings
+        Parameters:
+          - DefaultTtl
+      - Label:
+          default: Microsoft 365 / Email Records (blank = not created)
+        Parameters:
+          - MxRecordValue
+          - M365VerificationTxt
+          - SpfTxt
+          - AutodiscoverCnameValue
+          - WebmailCnameValue
+          - MsoidCnameValue
+      - Label:
+          default: Teams / Skype Records (blank = not created)
+        Parameters:
+          - LyncdiscoverCnameValue
+          - SipCnameValue
+          - SipTlsSrvValue
+          - SipFederationTlsSrvValue
+      - Label:
+          default: Old GoDaddy website (blank once the web app takes over)
+        Parameters:
+          - LegacyWebsiteIps
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used in tags and exports)
+      DomainName:
+        default: Apex domain (hosted zone)
+      DefaultTtl:
+        default: Default TTL (seconds) for record sets
+      MxRecordValue:
+        default: MX record value (priority + mail host)
+      M365VerificationTxt:
+        default: Microsoft 365 domain verification TXT
+      SpfTxt:
+        default: SPF TXT record (apex)
+      AutodiscoverCnameValue:
+        default: autodiscover CNAME target
+      WebmailCnameValue:
+        default: email (webmail) CNAME target
+      MsoidCnameValue:
+        default: msoid CNAME target
+      LyncdiscoverCnameValue:
+        default: lyncdiscover CNAME target
+      SipCnameValue:
+        default: sip CNAME target
+      SipTlsSrvValue:
+        default: _sip._tls SRV value (priority weight port target)
+      SipFederationTlsSrvValue:
+        default: _sipfederationtls._tcp SRV value (priority weight port target)
+      LegacyWebsiteIps:
+        default: Apex A record IPs for the old GoDaddy site (comma-separated)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: Prefix used in tags and exports.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  DomainName:
+    Type: String
+    Default: missionmenofanna.com
+    Description: Apex domain name for the public hosted zone.
+    AllowedPattern: ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name (e.g. missionmenofanna.com).
+
+  DefaultTtl:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: Default TTL in seconds applied to every record set in this stack.
+
+  # ---------- Microsoft 365 (email, via GoDaddy) ----------
+  MxRecordValue:
+    Type: String
+    Default: 0 missionmenofanna-com.mail.protection.outlook.com.
+    Description: MX record value (priority followed by the mail host, with trailing dot). Blank = no MX.
+
+  M365VerificationTxt:
+    Type: String
+    Default: NETORG18292252.onmicrosoft.com
+    Description: Microsoft 365 domain verification token (added as a TXT value at the apex). Blank = omitted.
+
+  SpfTxt:
+    Type: String
+    Default: v=spf1 include:secureserver.net -all
+    Description: >
+      SPF policy for the apex (added as a TXT value at the apex). Blank =
+      omitted. SES does not need an entry here: b_SES publishes its own SPF on
+      the MAIL FROM subdomain (mail.<domain>).
+
+  AutodiscoverCnameValue:
+    Type: String
+    Default: autodiscover.outlook.com.
+    Description: Target hostname for the autodiscover CNAME record (with trailing dot). Blank = no record.
+
+  WebmailCnameValue:
+    Type: String
+    Default: email.secureserver.net.
+    Description: Target hostname for the email (webmail) CNAME record (with trailing dot). Blank = no record.
+
+  MsoidCnameValue:
+    Type: String
+    Default: clientconfig.microsoftonline-p.net.
+    Description: >
+      Target of the msoid CNAME GoDaddy adds for Microsoft 365 (with trailing
+      dot). Microsoft treats this record as legacy; keep it for an identical
+      move and drop it later if desired. Blank = no record.
+
+  # ---------- Teams / Skype for Business ----------
+  LyncdiscoverCnameValue:
+    Type: String
+    Default: webdir.online.lync.com.
+    Description: Target of the lyncdiscover CNAME (with trailing dot). Blank = no record.
+
+  SipCnameValue:
+    Type: String
+    Default: sipdir.online.lync.com.
+    Description: Target of the sip CNAME (with trailing dot). Blank = no record.
+
+  SipTlsSrvValue:
+    Type: String
+    Default: 100 1 443 sipdir.online.lync.com.
+    Description: Value of the _sip._tls SRV record ("priority weight port target."). Blank = no record.
+
+  SipFederationTlsSrvValue:
+    Type: String
+    Default: 100 1 5061 sipfed.online.lync.com.
+    Description: Value of the _sipfederationtls._tcp SRV record ("priority weight port target."). Blank = no record.
+
+  # ---------- Old GoDaddy Website Builder site ----------
+  LegacyWebsiteIps:
+    Type: CommaDelimitedList
+    Default: 13.248.243.5,76.223.105.230
+    Description: >
+      IPv4 addresses the apex points at today (GoDaddy Website Builder). While
+      set, this stack keeps the old site answering at the apex and www
+      (www = CNAME to the apex, as at GoDaddy). Set it BLANK at cutover — that
+      removes both records — and then deploy f_DNS_Records, which points the
+      apex and www at the web app ALB. (Route53 can't hold the old records and
+      f_DNS_Records' aliases at the same time; f_DNS_Records fails cleanly if
+      these still exist.)
+
+Conditions:
+  HasMx: !Not [!Equals [!Ref MxRecordValue, '']]
+  HasVerification: !Not [!Equals [!Ref M365VerificationTxt, '']]
+  HasSpf: !Not [!Equals [!Ref SpfTxt, '']]
+  HasApexTxt: !Or [!Condition HasVerification, !Condition HasSpf]
+  HasAutodiscover: !Not [!Equals [!Ref AutodiscoverCnameValue, '']]
+  HasWebmail: !Not [!Equals [!Ref WebmailCnameValue, '']]
+  HasMsoid: !Not [!Equals [!Ref MsoidCnameValue, '']]
+  HasLyncdiscover: !Not [!Equals [!Ref LyncdiscoverCnameValue, '']]
+  HasSip: !Not [!Equals [!Ref SipCnameValue, '']]
+  HasSipTlsSrv: !Not [!Equals [!Ref SipTlsSrvValue, '']]
+  HasSipFederationSrv: !Not [!Equals [!Ref SipFederationTlsSrvValue, '']]
+  HasLegacyWebsite: !Not [!Equals [!Join ['', !Ref LegacyWebsiteIps], '']]
+
+Resources:
+
+  # ---------- Public Hosted Zone ----------
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub Public hosted zone for ${DomainName}
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-hosted-zone
+
+  # ---------- Apex MX (Microsoft 365 inbound mail) ----------
+  ApexMxRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasMx
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      Type: MX
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref MxRecordValue
+
+  # ---------- Apex TXT (M365 verification + SPF) ----------
+  # Both values live in ONE record set (Route53 allows a single TXT set per
+  # name). Each value must be wrapped in literal double quotes per Route53 /
+  # RFC 1035. A blank parameter drops just that value.
+  ApexTxtRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasApexTxt
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      Type: TXT
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !If [HasVerification, !Sub '"${M365VerificationTxt}"', !Ref 'AWS::NoValue']
+        - !If [HasSpf, !Sub '"${SpfTxt}"', !Ref 'AWS::NoValue']
+
+  # ---------- autodiscover CNAME (Outlook autodiscovery) ----------
+  AutodiscoverCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasAutodiscover
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub autodiscover.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref AutodiscoverCnameValue
+
+  # ---------- email CNAME (GoDaddy webmail) ----------
+  EmailCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasWebmail
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub email.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref WebmailCnameValue
+
+  # ---------- msoid CNAME (Microsoft 365 sign-in, legacy) ----------
+  MsoidCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasMsoid
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub msoid.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref MsoidCnameValue
+
+  # ---------- Teams / Skype for Business ----------
+  LyncdiscoverCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasLyncdiscover
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub lyncdiscover.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref LyncdiscoverCnameValue
+
+  SipCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasSip
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub sip.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref SipCnameValue
+
+  SipTlsSrvRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasSipTlsSrv
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub _sip._tls.${DomainName}
+      Type: SRV
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref SipTlsSrvValue
+
+  SipFederationTlsSrvRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasSipFederationSrv
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub _sipfederationtls._tcp.${DomainName}
+      Type: SRV
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref SipFederationTlsSrvValue
+
+  # ---------- Old GoDaddy website (until cutover) ----------
+  # Keeps today's site answering while DNS moves, the certificate validates
+  # and HTTPS is added to the ALB. Removed by setting LegacyWebsiteIps blank;
+  # f_DNS_Records then owns the apex and www.
+  LegacyApexARecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasLegacyWebsite
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      Type: A
+      TTL: !Ref DefaultTtl
+      ResourceRecords: !Ref LegacyWebsiteIps
+
+  LegacyWwwCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasLegacyWebsite
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub www.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref DomainName
+
+Outputs:
+  HostedZoneId:
+    Description: Route53 hosted zone ID — the HostedZoneId parameter of b_certificates, b_SES and f_DNS_Records
+    Value: !Ref HostedZone
+    Export:
+      Name: !Sub ${ProjectName}-hosted-zone-id
+
+  HostedZoneName:
+    Description: Hosted zone domain name
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub ${ProjectName}-hosted-zone-name
+
+  HostedZoneNameServers:
+    Description: >
+      The 4 Route53 name servers for this hosted zone — copy these to the
+      domain registrar so DNS resolution is delegated to Route53. DNS
+      propagation can take 2 to 48 hours to complete worldwide.
+    Value: !Join [",", !GetAtt HostedZone.NameServers]
+    Export:
+      Name: !Sub ${ProjectName}-hosted-zone-nameservers
+
+  LegacyWebsiteActive:
+    Description: Whether the apex / www still point at the old GoDaddy site
+    Value: !If [HasLegacyWebsite, 'yes', 'no']

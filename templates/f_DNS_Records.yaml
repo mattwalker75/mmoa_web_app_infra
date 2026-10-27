@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - Route53 DNS records
+  - missionmenofanna.com and www.missionmenofanna.com -> the web app ALB
+
+# ---------------------------------------------------------------------------
+# DEPLOY THIS LAST — it is the cutover from the old GoDaddy site to the app.
+# ---------------------------------------------------------------------------
+# Before deploying:
+#   1. HTTPS must already work on the ALB (b_certificates + the :443 listener
+#      on e_ALB_mmoa). The old GoDaddy site sends a 2-year HSTS header with
+#      includeSubDomains, so every browser that visited it will only load
+#      this domain over https — pointing the domain at an http-only ALB
+#      would look broken to them.
+#   2. Update a_DNS_base with LegacyWebsiteIps BLANK. That deletes its apex A
+#      and www CNAME; Route53 can't hold those and these aliases at the same
+#      name, so this stack fails cleanly ("already exists") if you skip it.
+#      Deploy this stack right after, to keep the gap to a minute or two.
+# After deploying: set the web app's publicBaseUrl to
+# https://missionmenofanna.com (Admin Console → Web App Settings) and
+# restart, so links in emails and the Open Graph / Facebook share tags use
+# the real domain.
+#
+# Unlike myevent365 there is no wildcard record: MMoA is one site on one ALB.
+# Serving both the apex and www means the certificate needs both names (it
+# has them). Redirecting www -> apex, if wanted, is an ALB listener rule or
+# app concern, not DNS.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: DNS (hosted zone from a_DNS_base)
+        Parameters:
+          - HostedZoneId
+          - DomainName
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used to import the ALB DNS name and ALB hosted zone ID)
+      HostedZoneId:
+        default: Route53 hosted zone ID (HostedZoneId output of a_DNS_base)
+      DomainName:
+        default: Apex domain of the hosted zone
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: >
+      Prefix used to import the ALB DNS name + canonical hosted zone ID from
+      the e_ALB_mmoa stack (exports <ProjectName>-alb-dns-name and
+      <ProjectName>-alb-canonical-hosted-zone-id).
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >
+      ID of the Route53 public hosted zone the records are written into — the
+      HostedZoneId output of the a_DNS_base stack.
+
+  DomainName:
+    Type: String
+    Default: missionmenofanna.com
+    Description: >
+      Apex domain of the hosted zone. Must match the zone's name exactly —
+      record names (apex, www) are built from it.
+    AllowedPattern: ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name (e.g. missionmenofanna.com).
+
+Resources:
+
+  # ---------- apex (missionmenofanna.com) A-alias -> web app ALB ----------
+  # A Route53 A-ALIAS (not CNAME — the apex can't be a CNAME) points the zone
+  # root at the ALB. EvaluateTargetHealth is true: this ALB fronts a single
+  # app, so tying the record to target health is safe.
+  ApexAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue: !Sub ${ProjectName}-alb-dns-name
+        HostedZoneId:
+          Fn::ImportValue: !Sub ${ProjectName}-alb-canonical-hosted-zone-id
+        EvaluateTargetHealth: true
+
+  # ---------- www.missionmenofanna.com A-alias -> web app ALB ----------
+  # www is a SAN on the b_certificates certificate, so the same ALB serves it
+  # over TLS.
+  WwwAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub www.${DomainName}
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue: !Sub ${ProjectName}-alb-dns-name
+        HostedZoneId:
+          Fn::ImportValue: !Sub ${ProjectName}-alb-canonical-hosted-zone-id
+        EvaluateTargetHealth: true
+
+Outputs:
+  ApexDomain:
+    Description: Apex domain pointing at the web app ALB
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub ${ProjectName}-apex-domain
+
+  WwwDomain:
+    Description: www domain pointing at the web app ALB
+    Value: !Sub www.${DomainName}
+    Export:
+      Name: !Sub ${ProjectName}-www-domain
+
+  SiteUrl:
+    Description: The site's public URL — set as the web app's publicBaseUrl
+    Value: !Sub https://${DomainName}

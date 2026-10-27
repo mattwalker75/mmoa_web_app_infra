@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - SES email identity for outbound transactional email
+  - Domain identity missionmenofanna.com with Easy DKIM (RSA 2048)
+  - Custom MAIL FROM domain mail.missionmenofanna.com
+  - Publishes DKIM CNAMEs + MAIL FROM MX/SPF + DMARC records into the
+    a_DNS_base hosted zone
+
+# ---------------------------------------------------------------------------
+# WHAT THIS STACK DOES / DOES NOT COVER
+# ---------------------------------------------------------------------------
+# Covers (same shape as car_show_management_infra/b_SES):
+#   * SES domain identity (Identity type: Domain) for missionmenofanna.com
+#   * DKIM signatures: Enabled, Easy DKIM, RSA_2048_BIT signing key
+#   * Custom MAIL FROM domain mail.<domain> with "Behavior on MX failure:
+#     Use default MAIL FROM domain" (USE_DEFAULT_VALUE)
+#   * The Route53 records SES needs, auto-derived so they track the identity:
+#       - 3x DKIM CNAME  (<token>._domainkey.<domain>)
+#       - MAIL FROM MX   (mail.<domain> -> 10 feedback-smtp.<region>.amazonses.com)
+#       - MAIL FROM SPF  (mail.<domain> TXT "v=spf1 include:amazonses.com ~all")
+#       - DMARC          (_dmarc.<domain> TXT, default policy p=none)
+#
+# Coexists with Microsoft 365: M365 keeps the apex MX and apex SPF
+# (a_DNS_base). SES only uses the mail.<domain> subdomain and its DKIM
+# CNAMEs, so mailbox mail is untouched. The domain had NO DMARC record at
+# GoDaddy, so this stack owns _dmarc — there can only be one; if Microsoft
+# 365 ever asks for one, change DmarcPolicy here instead of adding another.
+#
+# Does NOT cover (cannot be templated):
+#   * Production access (sandbox exit). That approval is attached to the AWS
+#     ACCOUNT + REGION, not to this identity. If this account already has it
+#     (e.g. from myevent365), nothing to do; otherwise request it in the SES
+#     console — in the sandbox SES only sends to verified addresses.
+#   * The web app's permission to send. Add a ses:SendEmail grant scoped to
+#     this identity to the mmoa_ec2_web_app role in b_IAM (the way
+#     car_show_management_infra/b_IAM's SesSend does for its control plane).
+#     The app sends through the SESv2 API with its instance profile
+#     (aws.runningInAws is true), so no keys go on disk.
+#
+# ORDER: deploy after the GoDaddy nameservers point at the a_DNS_base zone —
+# the identity verifies only once SES can see the DKIM records publicly
+# (minutes after propagation; Route53 is authoritative).
+#
+# THEN, in the web app's config (Admin Console → Web App Settings → Email):
+#   email.transport = 'ses', email.from = e.g. noreply@<domain>,
+#   email.replyTo = a real mailbox, restart — and once a real verification /
+#   reset email arrives, turn email.showLinksInBrowser OFF.
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: Identity
+        Parameters:
+          - DomainName
+          - MailFromSubdomain
+      - Label:
+          default: DNS (hosted zone from a_DNS_base)
+        Parameters:
+          - HostedZoneId
+          - DefaultTtl
+      - Label:
+          default: Policy records
+        Parameters:
+          - DmarcPolicy
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used in exports)
+      DomainName:
+        default: Domain to verify as the SES sending identity
+      MailFromSubdomain:
+        default: Subdomain used as the custom MAIL FROM domain
+      HostedZoneId:
+        default: Route53 hosted zone ID (HostedZoneId output of a_DNS_base)
+      DefaultTtl:
+        default: TTL (seconds) for the created record sets
+      DmarcPolicy:
+        default: DMARC policy for the domain
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: Prefix used in exports.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  DomainName:
+    Type: String
+    Default: missionmenofanna.com
+    Description: >
+      Domain verified as the SES sending identity. The web app sends as
+      addresses at this domain (e.g. noreply@missionmenofanna.com). Must match
+      the domain the b_IAM ses:SendEmail grant is scoped to.
+    AllowedPattern: ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name (e.g. missionmenofanna.com).
+
+  MailFromSubdomain:
+    Type: String
+    Default: mail
+    Description: >
+      Subdomain prefix for the custom MAIL FROM domain (default "mail" ->
+      mail.missionmenofanna.com). Must be a subdomain of DomainName that is
+      used for nothing else (GoDaddy's webmail uses "email", not "mail"). On
+      MX lookup failure SES falls back to its default MAIL FROM domain
+      (USE_DEFAULT_VALUE).
+    AllowedPattern: ^[a-zA-Z0-9-]+$
+    ConstraintDescription: A single DNS label (letters, digits, hyphens).
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >
+      ID of the Route53 public hosted zone for the domain — the HostedZoneId
+      output of the a_DNS_base stack. The DKIM, MAIL FROM, and DMARC records
+      are published into this zone.
+
+  DefaultTtl:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: TTL in seconds applied to every record set this stack creates.
+
+  DmarcPolicy:
+    Type: String
+    Default: v=DMARC1; p=none;
+    Description: >
+      Value of the _dmarc TXT record. The default (p=none, the value the SES
+      console publishes) means "monitor only, never reject" — safe while
+      warming up, and safe for the Microsoft 365 mailboxes too. Tighten to
+      "v=DMARC1; p=quarantine;" or "p=reject" later once real sending from
+      both SES and Microsoft 365 is proven clean.
+
+Resources:
+
+  # ---------- SES Domain Identity ----------
+  # Easy DKIM (SES manages the keys; we only publish CNAMEs), RSA 2048.
+  EmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref DomainName
+      DkimAttributes:
+        SigningEnabled: true
+      DkimSigningAttributes:
+        NextSigningKeyLength: RSA_2048_BIT
+      MailFromAttributes:
+        MailFromDomain: !Sub ${MailFromSubdomain}.${DomainName}
+        BehaviorOnMxFailure: USE_DEFAULT_VALUE
+
+  # ---------- DKIM CNAMEs (3) ----------
+  # Names/values come from the identity's generated tokens, so these records
+  # always match the CURRENT identity — recreating the identity regenerates
+  # tokens AND republishes matching records in the same stack operation.
+  DkimRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName1
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue1
+
+  DkimRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName2
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue2
+
+  DkimRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName3
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue3
+
+  # ---------- Custom MAIL FROM: MX ----------
+  # Receives bounce/complaint feedback for the MAIL FROM domain. The target
+  # is SES's regional feedback endpoint.
+  MailFromMxRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub ${MailFromSubdomain}.${DomainName}
+      Type: MX
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Sub 10 feedback-smtp.${AWS::Region}.amazonses.com
+
+  # ---------- Custom MAIL FROM: SPF ----------
+  # Authorizes SES to send envelope-from this subdomain. Lives ONLY on the
+  # MAIL FROM subdomain — the apex SPF (Microsoft 365 via GoDaddy, in
+  # a_DNS_base) is untouched and unaffected.
+  MailFromSpfRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub ${MailFromSubdomain}.${DomainName}
+      Type: TXT
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - '"v=spf1 include:amazonses.com ~all"'
+
+  # ---------- DMARC ----------
+  DmarcRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub _dmarc.${DomainName}
+      Type: TXT
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Sub '"${DmarcPolicy}"'
+
+Outputs:
+  SesIdentityDomain:
+    Description: Domain verified as the SES sending identity
+    Value: !Ref EmailIdentity
+    Export:
+      Name: !Sub ${ProjectName}-ses-identity-domain
+
+  SesIdentityArn:
+    Description: ARN of the SES identity (the scope for the b_IAM ses:SendEmail grant)
+    Value: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${DomainName}
+    Export:
+      Name: !Sub ${ProjectName}-ses-identity-arn
+
+  MailFromDomain:
+    Description: Custom MAIL FROM domain
+    Value: !Sub ${MailFromSubdomain}.${DomainName}
+    Export:
+      Name: !Sub ${ProjectName}-ses-mail-from-domain

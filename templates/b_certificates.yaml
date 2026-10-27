@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  mmoa - ACM certificate in Certificate Manager
+  - missionmenofanna.com + www.missionmenofanna.com for the web app ALB
+
+# NOTE: Unlike myevent365 (a wildcard for per-event subdomains plus an
+# apex/www cert), MMoA is one site, so ONE certificate covers the apex with
+# www as a SAN. Public ACM certificates are non-exportable by default
+# (matches the console "Disable export" choice). Validation records are
+# created automatically in Route53 because DomainValidationOptions provides
+# the HostedZoneId parameter — equivalent to the console option "Create
+# records in Route 53".
+#
+# Stack creation WAITS until validation succeeds. That needs the zone to be
+# live: deploy this only after the GoDaddy nameservers point at the
+# a_DNS_base zone and the change has propagated (check with
+# "dig NS missionmenofanna.com" showing the awsdns-* servers). Once it has,
+# validation normally takes a few minutes. (ACM gives up after 72 hours.)
+#
+# The certificate is used by the HTTPS :443 listener on e_ALB_mmoa (import
+# ${ProjectName}-certificate-arn). ACM renews it automatically as long as the
+# validation CNAMEs stay in the zone — don't delete them.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project
+        Parameters:
+          - ProjectName
+      - Label:
+          default: DNS (hosted zone from a_DNS_base)
+        Parameters:
+          - HostedZoneId
+      - Label:
+          default: Web App Certificate (apex + www)
+        Parameters:
+          - BaseCertificateDomainName
+          - WwwAlternativeName
+      - Label:
+          default: Common
+        Parameters:
+          - KeyAlgorithm
+    ParameterLabels:
+      ProjectName:
+        default: Project name (used in tags and exports)
+      HostedZoneId:
+        default: Route53 hosted zone ID (HostedZoneId output of a_DNS_base)
+      BaseCertificateDomainName:
+        default: Certificate apex domain name
+      WwwAlternativeName:
+        default: Certificate www SAN
+      KeyAlgorithm:
+        default: Certificate key algorithm
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mmoa
+    Description: Prefix used in tags and exports.
+    MinLength: 2
+    MaxLength: 32
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+    ConstraintDescription: Lowercase letters, digits, and hyphens; must start with a letter.
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >
+      ID of the Route53 public hosted zone for the domain — the HostedZoneId
+      output of the a_DNS_base stack (or look it up in the Route53 console /
+      "aws route53 list-hosted-zones-by-name"). The validation records are
+      created in this zone.
+
+  BaseCertificateDomainName:
+    Type: String
+    Default: missionmenofanna.com
+    Description: >
+      Apex domain for the certificate. Must be the zone's domain (or fall
+      under it), since the validation record is created in that zone. www is
+      added as a SAN below.
+    AllowedPattern: ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name (e.g. missionmenofanna.com).
+
+  WwwAlternativeName:
+    Type: String
+    Default: www.missionmenofanna.com
+    Description: Additional name (SAN) added to the certificate.
+
+  KeyAlgorithm:
+    Type: String
+    Default: RSA_2048
+    Description: Key algorithm for the certificate.
+    AllowedValues:
+      - RSA_2048
+      - EC_prime256v1
+      - EC_secp384r1
+
+Resources:
+
+  # ---------- ACM Public Certificate: apex + www (web app) ----------
+  # Validation records for both names are auto-created in the same Route53
+  # hosted zone.
+  WebAppCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref BaseCertificateDomainName
+      SubjectAlternativeNames:
+        - !Ref WwwAlternativeName
+      ValidationMethod: DNS
+      KeyAlgorithm: !Ref KeyAlgorithm
+      DomainValidationOptions:
+        - DomainName: !Ref BaseCertificateDomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Ref WwwAlternativeName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-web-app-cert
+
+Outputs:
+  CertificateArn:
+    Description: ARN of the apex + www ACM certificate (the e_ALB_mmoa HTTPS listener imports it)
+    Value: !Ref WebAppCertificate
+    Export:
+      Name: !Sub ${ProjectName}-certificate-arn
+
+  CertificateDomainName:
+    Description: Apex domain covered by the certificate (www is a SAN)
+    Value: !Ref BaseCertificateDomainName
+    Export:
+      Name: !Sub ${ProjectName}-certificate-domain
