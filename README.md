@@ -330,7 +330,7 @@ are the durable copy.**
 | 3. Nameservers at GoDaddy | ✅ Switched to `ns-75.awsdns-09.com`, `ns-757.awsdns-30.net`, `ns-1260.awsdns-29.org`, `ns-1537.awsdns-00.co.uk` (registry updated 20:35 CDT). Email (Microsoft 365) verified unchanged. Registration still at GoDaddy |
 | 4. Certificate (`b_certificates`) | ✅ Issued |
 | 4. SES (`b_SES`) | ⏳ Not deployed yet |
-| 5. HTTPS on the ALB (`e_ALB`) | ⏳ Stack update in progress |
+| 5. HTTPS on the ALB (`e_ALB`) | ✅ Live 20:57 CDT. TLS 1.3, Amazon-issued cert for the apex + `www` (renews automatically); `http://` → 301 to `https://` |
 | 6. `publicBaseUrl` → `https://missionmenofanna.com` | ⏳ After step 5 |
 | 7. App email via SES + `showLinksInBrowser` off | ⏳ After `b_SES` and the `b_IAM` grant |
 
