@@ -321,6 +321,19 @@ are the durable copy.**
 
 ## Domain, HTTPS and email (missionmenofanna.com)
 
+**Status (2026-10-27):**
+
+| Step | State |
+|------|-------|
+| 1. Zone (`a_DNS_base`) | ✅ Deployed. Hosted zone ID **`Z04038972KU26BM2E7UHW`** (now the default `HostedZoneId` of `b_certificates`, `b_SES` and `f_DNS_Records`) |
+| 2. Site records (`f_DNS_Records`) | ✅ Deployed. Apex + `www` alias the ALB |
+| 3. Nameservers at GoDaddy | ✅ Switched to `ns-75.awsdns-09.com`, `ns-757.awsdns-30.net`, `ns-1260.awsdns-29.org`, `ns-1537.awsdns-00.co.uk` (registry updated 20:35 CDT). Email (Microsoft 365) verified unchanged. Registration still at GoDaddy |
+| 4. Certificate (`b_certificates`) | ✅ Issued |
+| 4. SES (`b_SES`) | ⏳ Not deployed yet |
+| 5. HTTPS on the ALB (`e_ALB`) | ⏳ Stack update in progress |
+| 6. `publicBaseUrl` → `https://missionmenofanna.com` | ⏳ After step 5 |
+| 7. App email via SES + `showLinksInBrowser` off | ⏳ After `b_SES` and the `b_IAM` grant |
+
 The domain is registered at GoDaddy, which today also serves a Website
 Builder site and Microsoft 365 email. The move keeps email working the whole
 time. The old Website Builder site is **not** carried over (decided
