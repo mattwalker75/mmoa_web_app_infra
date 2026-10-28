@@ -6,6 +6,8 @@ Description: >
   - mmoa_admin_console is the managed policy the admin console uses to reach
     the web app instance
   - NEITHER role can create, modify, or delete AWS resources
+  - mmoa_ec2_web_app may send email through SES as the missionmenofanna.com
+    identity (b_SES) — sending only
 
 # ---------------------------------------------------------------------------
 # NO-PROVISIONING RULE
@@ -20,6 +22,8 @@ Description: >
 #   - mmoa_admin_console: ssm:SendCommand to the web app instance ONLY (by
 #     Name tag) plus read-only Describe/Get/List calls. Running a command on
 #     an existing instance does not create an AWS resource.
+#   - WebAppEmail (on mmoa_ec2_web_app): ses:SendEmail on the one SES domain
+#     identity b_SES owns. Sending a message creates nothing.
 # ---------------------------------------------------------------------------
 
 Metadata:
@@ -33,6 +37,7 @@ Metadata:
           default: Web App Role
         Parameters:
           - WebAppRoleName
+          - SesIdentityDomain
       - Label:
           default: Admin Console Role
         Parameters:
@@ -43,6 +48,8 @@ Metadata:
         default: Project name (used in tags and exports)
       WebAppRoleName:
         default: Web App EC2 IAM role name
+      SesIdentityDomain:
+        default: SES identity domain the web app may send as
       AdminConsoleRoleName:
         default: Admin Console EC2 IAM role name
       WebAppInstanceName:
@@ -65,6 +72,18 @@ Parameters:
     MinLength: 1
     MaxLength: 64
     AllowedPattern: ^[a-zA-Z0-9_+=,.@-]+$
+
+  SesIdentityDomain:
+    Type: String
+    Default: missionmenofanna.com
+    Description: >
+      Domain of the SES email identity the web app sends from
+      (noreply@<domain> etc.). The identity is owned by b_SES.yaml (same
+      DomainName). Scopes the web app role's ses:SendEmail to this one
+      identity. Production access (sandbox exit) is account + region level
+      and unaffected by this policy.
+    AllowedPattern: ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid domain name (e.g. missionmenofanna.com).
 
   AdminConsoleRoleName:
     Type: String
@@ -89,13 +108,15 @@ Parameters:
 Resources:
 
   # ---------- Web App EC2 Role ----------
-  # SSM core only: Session Manager access with no SSH, and a Run Command
-  # target for the admin console. The app makes no AWS API calls of its own.
+  # SSM core (Session Manager access with no SSH, and a Run Command target
+  # for the admin console) plus SES sending. Sending email is the app's only
+  # AWS API call (helpers/email.js, SESv2 SendEmail, when email.transport is
+  # 'ses'); it uses this instance profile because aws.runningInAws is true.
   WebAppRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref WebAppRoleName
-      Description: Role assumed by the mmoa web app EC2 instance (SSM-managed; cannot create AWS resources).
+      Description: Role assumed by the mmoa web app EC2 instance (SSM-managed; may send SES email; cannot create AWS resources).
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -105,6 +126,20 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: WebAppEmail
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # --- SES: transactional email (verification, password reset) ---
+              # Locked to the domain identity b_SES owns. SESv2 SendEmail
+              # authorizes against the From address's identity; the domain
+              # identity covers every address at the domain (noreply@, …).
+              - Sid: SesSend
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesIdentityDomain}
       Tags:
         - Key: Name
           Value: !Ref WebAppRoleName

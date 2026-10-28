@@ -98,7 +98,7 @@ depend on each other.
 | [`b_certificates.yaml`](templates/b_certificates.yaml) | One ACM certificate, `missionmenofanna.com` + SAN `www.missionmenofanna.com`, DNS-validated in the zone; exports `mmoa-certificate-arn` | `a_DNS_base` **and** the nameserver switch |
 | [`b_SES.yaml`](templates/b_SES.yaml) | SES domain identity (Easy DKIM, RSA 2048), MAIL FROM `mail.missionmenofanna.com`, and its records: 3 DKIM CNAMEs, MAIL FROM MX + SPF, `_dmarc` (`p=none`) | `a_DNS_base` **and** the nameserver switch |
 | [`b_network.yaml`](templates/b_network.yaml) | Small VPC `10.1.0.0/24`, 2 public + 2 private `/26` subnets across `us-east-1a/b`, IGW, single NAT Gateway in AZ1, route tables | none |
-| [`b_IAM.yaml`](templates/b_IAM.yaml) | `mmoa_ec2_web_app` role/profile (SSM core only). `mmoa_admin_console` **managed policy** (SSM Run Command to the instance tagged `mmoa_web_app` + read-only EC2/ELB). `mmoa_ec2_adminconsole` role/profile (SSM core + that policy). That role isn't attached to anything yet because the console runs off-AWS; attach the managed policy to the console's IAM user with `aws iam attach-user-policy` | none |
+| [`b_IAM.yaml`](templates/b_IAM.yaml) | `mmoa_ec2_web_app` role/profile (SSM core + `ses:SendEmail` on the `missionmenofanna.com` identity only). `mmoa_admin_console` **managed policy** (SSM Run Command to the instance tagged `mmoa_web_app` + read-only EC2/ELB). `mmoa_ec2_adminconsole` role/profile (SSM core + that policy). That role isn't attached to anything yet because the console runs off-AWS; attach the managed policy to the console's IAM user with `aws iam attach-user-policy` | none |
 | [`c_security_groups.yaml`](templates/c_security_groups.yaml) | Web app SG `mmoa_ec2_web_app_sg` (self-ingress on `AppPort`) and ALB SG `mmoa_alb_inbound_sg` (80/443 from `0.0.0.0/0`) | `b_network` |
 | [`d_EC2_web_app.yaml`](templates/d_EC2_web_app.yaml) | `mmoa_web_app`: single `t3.small` AL2023 instance, `8 GiB gp3` root, private subnet 1, SSM-managed. User data clones + configures + starts the app, installs `mmoa-web-app.service` (restart on reboot) and `mmoa-web-app-backup.timer` (daily SQLite snapshot) | `b_IAM`, `b_network`, `c_security_groups` |
 | [`e_ALB.yaml`](templates/e_ALB.yaml) | `mmoa-webapp-alb` + HTTPS:443 listener (certificate from `b_certificates`) **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check); HTTP:80 **redirects** to HTTPS | `b_network`, `c_security_groups`, `d_EC2_web_app`, `b_certificates` |
@@ -329,10 +329,10 @@ are the durable copy.**
 | 2. Site records (`f_DNS_Records`) | ✅ Deployed. Apex + `www` alias the ALB |
 | 3. Nameservers at GoDaddy | ✅ Switched to `ns-75.awsdns-09.com`, `ns-757.awsdns-30.net`, `ns-1260.awsdns-29.org`, `ns-1537.awsdns-00.co.uk` (registry updated 20:35 CDT). Email (Microsoft 365) verified unchanged. Registration still at GoDaddy |
 | 4. Certificate (`b_certificates`) | ✅ Issued |
-| 4. SES (`b_SES`) | ⏳ Not deployed yet |
+| 4. SES (`b_SES`) | ✅ Deployed (MAIL FROM MX/SPF and DMARC public) |
 | 5. HTTPS on the ALB (`e_ALB`) | ✅ Live 20:57 CDT. TLS 1.3, Amazon-issued cert for the apex + `www` (renews automatically); `http://` → 301 to `https://` |
 | 6. `publicBaseUrl` → `https://missionmenofanna.com` | ⏳ After step 5 |
-| 7. App email via SES + `showLinksInBrowser` off | ⏳ After `b_SES` and the `b_IAM` grant |
+| 7. App email via SES + `showLinksInBrowser` off | ⏳ `b_IAM` now has the `ses:SendEmail` grant (update the stack); then test, then turn the show-links setting off |
 
 The domain is registered at GoDaddy, which today also serves a Website
 Builder site and Microsoft 365 email. The move keeps email working the whole
