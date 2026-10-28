@@ -39,7 +39,11 @@ Description: >
 #
 # ORDER: deploy after the GoDaddy nameservers point at the a_DNS_base zone —
 # the identity verifies only once SES can see the DKIM records publicly
-# (minutes after propagation; Route53 is authoritative).
+# (minutes after propagation; Route53 is authoritative). Done 2026-10-27:
+# the zone is live, and none of the records below existed beforehand, so
+# this stack can be deployed with every default. The stack completes as soon
+# as the identity and records exist; "Verified" status in the SES console
+# follows a few minutes later.
 #
 # THEN, in the web app's config (Admin Console → Web App Settings → Email):
 #   email.transport = 'ses', email.from = e.g. noreply@<domain>,
