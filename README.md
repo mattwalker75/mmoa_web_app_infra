@@ -66,7 +66,7 @@ user data already sets `aws.runningInAws: true`, so no keys go on disk.)
 
 ```
                  Internet
-                    │  HTTP :80   (HTTPS :443 + missionmenofanna.com: see "Domain, HTTPS and email")
+                    │  HTTPS :443 missionmenofanna.com (HTTP :80 → 301 to HTTPS)
                     ▼
         ┌──────────────────────────┐
         │ mmoa-webapp-alb          │
@@ -101,7 +101,7 @@ depend on each other.
 | [`b_IAM.yaml`](templates/b_IAM.yaml) | `mmoa_ec2_web_app` role/profile (SSM core only). `mmoa_admin_console` **managed policy** (SSM Run Command to the instance tagged `mmoa_web_app` + read-only EC2/ELB). `mmoa_ec2_adminconsole` role/profile (SSM core + that policy). That role isn't attached to anything yet because the console runs off-AWS; attach the managed policy to the console's IAM user with `aws iam attach-user-policy` | none |
 | [`c_security_groups.yaml`](templates/c_security_groups.yaml) | Web app SG `mmoa_ec2_web_app_sg` (self-ingress on `AppPort`) and ALB SG `mmoa_alb_inbound_sg` (80/443 from `0.0.0.0/0`) | `b_network` |
 | [`d_EC2_web_app.yaml`](templates/d_EC2_web_app.yaml) | `mmoa_web_app`: single `t3.small` AL2023 instance, `8 GiB gp3` root, private subnet 1, SSM-managed. User data clones + configures + starts the app, installs `mmoa-web-app.service` (restart on reboot) and `mmoa-web-app-backup.timer` (daily SQLite snapshot) | `b_IAM`, `b_network`, `c_security_groups` |
-| [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTP:80 listener **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check). HTTPS :443 not added yet | `b_network`, `c_security_groups`, `d_EC2_web_app` |
+| [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTPS:443 listener (certificate from `b_certificates`) **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check); HTTP:80 **redirects** to HTTPS | `b_network`, `c_security_groups`, `d_EC2_web_app`, `b_certificates` |
 | [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB | `a_DNS_base`, `e_ALB_mmoa` |
 
 `b_certificates`, `b_SES` and `f_DNS_Records` take the zone as a
@@ -359,10 +359,12 @@ affects past visitors). For them the new site works once step 5 is done.
    ```
    The certificate stack waits until ACM validates (a few minutes once DNS
    has moved).
-5. **HTTPS on the ALB.** In `e_ALB_mmoa`, add a 443 listener with the
-   certificate (`Fn::ImportValue: mmoa-certificate-arn`) forwarding to the
-   target group, and change the :80 listener to a 301 redirect to HTTPS.
-   The ALB SG already allows 443.
+5. **HTTPS on the ALB.** Update the existing `e_ALB_mmoa` stack with the
+   current template (after `mmoa-certificates` is `CREATE_COMPLETE`). It adds
+   the 443 listener with the certificate (`mmoa-certificate-arn`) forwarding
+   to the target group and turns the :80 listener into a 301 redirect to
+   HTTPS. The ALB SG already allows 443. Target group and instance are
+   untouched.
 6. **App settings** (Admin Console → Web App Settings), then restart:
    `publicBaseUrl` = `https://missionmenofanna.com` (links in emails and the
    Facebook / Open Graph share tags). Refresh an event link once in

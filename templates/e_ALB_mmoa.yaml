@@ -1,22 +1,26 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   mmoa - Web App ALB Load Balancer
-  - HTTP :80 forwards to the web app instance on the app port
-  - HTTPS :443 is NOT set up yet (no certificate) — planned change
+  - HTTPS :443 (missionmenofanna.com + www certificate from b_certificates)
+    forwards to the web app instance on the app port
+  - HTTP :80 redirects to HTTPS (301)
 
 # ---------------------------------------------------------------------------
-# HTTP NOW, HTTPS LATER
+# HTTPS (mirrors car_show_management_infra/e_ALB_control_plane)
 # ---------------------------------------------------------------------------
-# For now the ALB listens on :80 and FORWARDS to the target group (no
-# redirect, since there is no :443 listener to redirect to). Reach the app at
-# the ALB's AWS DNS name (LoadBalancerDnsName output).
+# The :443 listener imports ${ProjectName}-certificate-arn from the
+# b_certificates stack, so deploy/update this stack only AFTER that stack is
+# CREATE_COMPLETE (the certificate is issued). Until then the import doesn't
+# exist and this update fails cleanly with nothing changed.
 #
-# To move to HTTPS later (mirrors e_ALB_car_show / e_ALB_control_plane):
-#   1. Add a b_certificates stack (ACM cert for the mmoa domain) and a
-#      f_DNS_Records stack (Route53 alias -> this ALB).
-#   2. Add an HttpsListener on 443 with that cert, forwarding to TargetGroup.
-#   3. Change HttpListener's default action to the 301 redirect to HTTPS.
-# The ALB security group already allows 443.
+# The :80 listener redirects every request to https (same host, path and
+# query, 301) — including requests to the ALB's own AWS DNS name, which then
+# gets a certificate-name warning in the browser (expected: the certificate
+# covers missionmenofanna.com and www only). Use the domain.
+#
+# Updating from the http-only version swaps the :80 listener's default
+# action in place and adds :443; the target group and instance are untouched.
+# The ALB SG (c_security_groups) already allows 443.
 # ---------------------------------------------------------------------------
 
 Metadata:
@@ -30,6 +34,7 @@ Metadata:
           default: Load Balancer
         Parameters:
           - AlbName
+          - SslPolicy
       - Label:
           default: Target Group
         Parameters:
@@ -40,6 +45,8 @@ Metadata:
         default: Project name (used for tags and to import shared resources)
       AlbName:
         default: ALB name
+      SslPolicy:
+        default: HTTPS listener SSL policy
       TargetGroupName:
         default: Target group name
       HealthCheckPath:
@@ -62,6 +69,11 @@ Parameters:
     Default: mmoa-webapp-alb
     Description: Name of the Application Load Balancer.
     MaxLength: 32
+
+  SslPolicy:
+    Type: String
+    Default: ELBSecurityPolicy-TLS13-1-2-2021-06
+    Description: Predefined SSL security policy used by the HTTPS listener.
 
   TargetGroupName:
     Type: String
@@ -130,7 +142,22 @@ Resources:
         - Key: Name
           Value: !Ref TargetGroupName
 
-  # ---------- HTTP Listener (80) → forward to the web app ----------
+  # ---------- HTTPS Listener (443, apex + www cert) → forward to the web app ----------
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      SslPolicy: !Ref SslPolicy
+      Certificates:
+        - CertificateArn:
+            Fn::ImportValue: !Sub ${ProjectName}-certificate-arn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------- HTTP Listener (80) → redirect to HTTPS ----------
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -138,8 +165,14 @@ Resources:
       Protocol: HTTP
       Port: 80
       DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroup
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: '#{host}'
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: HTTP_301
 
 Outputs:
   LoadBalancerArn:
@@ -149,13 +182,13 @@ Outputs:
       Name: !Sub ${ProjectName}-alb-arn
 
   LoadBalancerDnsName:
-    Description: ALB public DNS name (browse here until DNS is set up; future Route53 alias target)
+    Description: ALB public DNS name (the Route53 alias target of f_DNS_Records)
     Value: !GetAtt LoadBalancer.DNSName
     Export:
       Name: !Sub ${ProjectName}-alb-dns-name
 
   LoadBalancerCanonicalHostedZoneId:
-    Description: ALB canonical hosted zone ID (required for future Route53 A/AAAA alias records)
+    Description: ALB canonical hosted zone ID (required for the Route53 A alias records in f_DNS_Records)
     Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
     Export:
       Name: !Sub ${ProjectName}-alb-canonical-hosted-zone-id
@@ -166,8 +199,14 @@ Outputs:
     Export:
       Name: !Sub ${ProjectName}-target-group-arn
 
+  HttpsListenerArn:
+    Description: HTTPS (:443) listener ARN
+    Value: !Ref HttpsListener
+    Export:
+      Name: !Sub ${ProjectName}-https-listener-arn
+
   HttpListenerArn:
-    Description: HTTP (:80) listener ARN
+    Description: HTTP (:80, redirect to HTTPS) listener ARN
     Value: !Ref HttpListener
     Export:
       Name: !Sub ${ProjectName}-http-listener-arn
