@@ -331,8 +331,8 @@ are the durable copy.**
 | 4. Certificate (`b_certificates`) | ✅ Issued |
 | 4. SES (`b_SES`) | ✅ Deployed (MAIL FROM MX/SPF and DMARC public) |
 | 5. HTTPS on the ALB (`e_ALB`) | ✅ Live 20:57 CDT. TLS 1.3, Amazon-issued cert for the apex + `www` (renews automatically); `http://` → 301 to `https://` |
-| 6. `publicBaseUrl` → `https://missionmenofanna.com` | ⏳ After step 5 |
-| 7. App email via SES + `showLinksInBrowser` off | ⏳ `b_IAM` now has the `ses:SendEmail` grant (update the stack); then test, then turn the show-links setting off |
+| 6. `publicBaseUrl` → `https://missionmenofanna.com` | Set in the admin console (Web App Settings) |
+| 7. App email via SES + `showLinksInBrowser` off | ✅ `b_IAM` grant deployed; app on `email.transport` = `ses`; verification email delivered; show-links setting OFF |
 
 The domain is registered at GoDaddy, which today also serves a Website
 Builder site and Microsoft 365 email. The move keeps email working the whole
