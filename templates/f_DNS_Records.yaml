@@ -13,7 +13,7 @@ Description: >
 #
 # HTTPS: the old GoDaddy site sent a 2-year HSTS header (includeSubDomains).
 # Browsers that visited it will only load this domain over https, so for
-# them the site works once b_certificates + the :443 listener on e_ALB_mmoa
+# them the site works once b_certificates + the :443 listener on e_ALB
 # are in place; everyone else can use http until then.
 #
 # If a_DNS_base was deployed with LegacyWebsiteIps set (old site kept), blank
@@ -56,7 +56,7 @@ Parameters:
     Default: mmoa
     Description: >
       Prefix used to import the ALB DNS name + canonical hosted zone ID from
-      the e_ALB_mmoa stack (exports <ProjectName>-alb-dns-name and
+      the e_ALB stack (exports <ProjectName>-alb-dns-name and
       <ProjectName>-alb-canonical-hosted-zone-id).
     MinLength: 2
     MaxLength: 32

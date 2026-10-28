@@ -23,7 +23,7 @@ Description: >
 #   publicBaseUrl     = PublicBaseUrl (only when the parameter is non-blank)
 # Everything else is changed later from the admin console (Web App Settings),
 # followed by a restart from its power bar.
-# Health check: GET /health (e_ALB_mmoa HealthCheckPath).
+# Health check: GET /health (e_ALB HealthCheckPath).
 # sqlite3 CLI: the admin console queries the DB over SSM with `sqlite3 -json`,
 # which needs sqlite3 >= 3.33. Amazon Linux 2023's `sqlite` package is 3.40+.
 # ---------------------------------------------------------------------------

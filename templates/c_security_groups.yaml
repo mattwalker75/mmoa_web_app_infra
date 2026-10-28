@@ -44,7 +44,7 @@ Parameters:
 
   # Must match `port` in mmoa_web_app's config.json (3004). This is the single
   # source of truth on the infra side: it is exported as ${ProjectName}-app-port
-  # and imported by e_ALB_mmoa (target group + target registration).
+  # and imported by e_ALB (target group + target registration).
   AppPort:
     Type: Number
     Default: 3004
@@ -82,7 +82,7 @@ Resources:
 
   # Self-reference rule must live in a separate resource (CFN can't reference
   # a SG from inside its own SecurityGroupIngress block). The ALB is made a
-  # member of this group (see e_ALB_mmoa), so this rule is what lets the ALB
+  # member of this group (see e_ALB), so this rule is what lets the ALB
   # reach the instance on the app port.
   AppSecurityGroupSelfIngress:
     Type: AWS::EC2::SecurityGroupIngress

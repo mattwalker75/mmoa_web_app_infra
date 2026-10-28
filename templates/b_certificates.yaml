@@ -17,7 +17,7 @@ Description: >
 # "dig NS missionmenofanna.com" showing the awsdns-* servers). Once it has,
 # validation normally takes a few minutes. (ACM gives up after 72 hours.)
 #
-# The certificate is used by the HTTPS :443 listener on e_ALB_mmoa (import
+# The certificate is used by the HTTPS :443 listener on e_ALB (import
 # ${ProjectName}-certificate-arn). ACM renews it automatically as long as the
 # validation CNAMEs stay in the zone — don't delete them.
 
@@ -123,7 +123,7 @@ Resources:
 
 Outputs:
   CertificateArn:
-    Description: ARN of the apex + www ACM certificate (the e_ALB_mmoa HTTPS listener imports it)
+    Description: ARN of the apex + www ACM certificate (the e_ALB HTTPS listener imports it)
     Value: !Ref WebAppCertificate
     Export:
       Name: !Sub ${ProjectName}-certificate-arn

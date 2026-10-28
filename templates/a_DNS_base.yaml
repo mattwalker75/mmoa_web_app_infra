@@ -40,7 +40,7 @@ Description: >
 #      switch; the site becomes the web app (http until step 4).
 #      Propagation: minutes to 48 hours.
 #   4. Deploy b_certificates (validates through this zone) and b_SES, then
-#      add the HTTPS listener to e_ALB_mmoa. Until this is done, browsers
+#      add the HTTPS listener to e_ALB. Until this is done, browsers
 #      that visited the OLD site can't open the new one: that site sent a
 #      2-year HSTS header (includeSubDomains), so they insist on https.
 #

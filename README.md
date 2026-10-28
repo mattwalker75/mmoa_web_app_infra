@@ -41,7 +41,7 @@ them, change it here too:
 | App start script | `d_EC2_web_app` → `StartScript` (first boot **and** the systemd unit; the unit's stop side is `STOP_APP.sh`) | `START_APP.sh` |
 | Node.js | `d_EC2_web_app` → `NodeVersion` (nvm, per app user; the app needs ≥ 20.19 and its Angular 21 build supports 20 / 22 / 24) | `24` |
 | Public URL baked into verification / reset links and Open Graph tags | `d_EC2_web_app` → `PublicBaseUrl` (optional; blank keeps `http://localhost:3004`) | blank |
-| Health check path | `e_ALB_mmoa` → `HealthCheckPath` (`GET /health`, 200, no DB access) | `/health` |
+| Health check path | `e_ALB` → `HealthCheckPath` (`GET /health`, 200, no DB access) | `/health` |
 | `sqlite3` CLI on the host | `d_EC2_web_app` user data installs AL2023's `sqlite` package (3.40+). The admin console's `sqlite3 -json` queries need ≥ 3.33 | AL2023 |
 
 User data seds the committed (scrubbed) `config.json` on first boot: `port`
@@ -101,8 +101,8 @@ depend on each other.
 | [`b_IAM.yaml`](templates/b_IAM.yaml) | `mmoa_ec2_web_app` role/profile (SSM core only). `mmoa_admin_console` **managed policy** (SSM Run Command to the instance tagged `mmoa_web_app` + read-only EC2/ELB). `mmoa_ec2_adminconsole` role/profile (SSM core + that policy). That role isn't attached to anything yet because the console runs off-AWS; attach the managed policy to the console's IAM user with `aws iam attach-user-policy` | none |
 | [`c_security_groups.yaml`](templates/c_security_groups.yaml) | Web app SG `mmoa_ec2_web_app_sg` (self-ingress on `AppPort`) and ALB SG `mmoa_alb_inbound_sg` (80/443 from `0.0.0.0/0`) | `b_network` |
 | [`d_EC2_web_app.yaml`](templates/d_EC2_web_app.yaml) | `mmoa_web_app`: single `t3.small` AL2023 instance, `8 GiB gp3` root, private subnet 1, SSM-managed. User data clones + configures + starts the app, installs `mmoa-web-app.service` (restart on reboot) and `mmoa-web-app-backup.timer` (daily SQLite snapshot) | `b_IAM`, `b_network`, `c_security_groups` |
-| [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTPS:443 listener (certificate from `b_certificates`) **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check); HTTP:80 **redirects** to HTTPS | `b_network`, `c_security_groups`, `d_EC2_web_app`, `b_certificates` |
-| [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB | `a_DNS_base`, `e_ALB_mmoa` |
+| [`e_ALB.yaml`](templates/e_ALB.yaml) | `mmoa-webapp-alb` + HTTPS:443 listener (certificate from `b_certificates`) **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check); HTTP:80 **redirects** to HTTPS | `b_network`, `c_security_groups`, `d_EC2_web_app`, `b_certificates` |
+| [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB | `a_DNS_base`, `e_ALB` |
 
 `b_certificates`, `b_SES` and `f_DNS_Records` take the zone as a
 `HostedZoneId` **parameter** (the `HostedZoneId` output of `a_DNS_base`), the
@@ -181,7 +181,7 @@ aws cloudformation deploy --stack-name mmoa-ec2-web-app \
   # add PublicBaseUrl=https://www.example.org once there is a domain
 
 aws cloudformation deploy --stack-name mmoa-alb \
-  --template-file e_ALB_mmoa.yaml
+  --template-file e_ALB.yaml
 
 aws cloudformation describe-stacks --stack-name mmoa-alb \
   --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDnsName'].OutputValue" \
@@ -359,7 +359,7 @@ affects past visitors). For them the new site works once step 5 is done.
    ```
    The certificate stack waits until ACM validates (a few minutes once DNS
    has moved).
-5. **HTTPS on the ALB.** Update the existing `e_ALB_mmoa` stack with the
+5. **HTTPS on the ALB.** Update the existing `e_ALB` stack with the
    current template (after `mmoa-certificates` is `CREATE_COMPLETE`). It adds
    the 443 listener with the certificate (`mmoa-certificate-arn`) forwarding
    to the target group and turns the :80 listener into a 301 redirect to
