@@ -94,7 +94,7 @@ depend on each other.
 
 | File | What it provisions | Depends on |
 |------|--------------------|------------|
-| [`a_DNS_base.yaml`](templates/a_DNS_base.yaml) | Route53 hosted zone for `missionmenofanna.com` with the records the domain has at GoDaddy today: Microsoft 365 (MX, verification + SPF TXT, `autodiscover` / `email` / `msoid` CNAMEs), Teams (`lyncdiscover` / `sip` CNAMEs, two SRVs) and, until cutover, the old GoDaddy site at the apex + `www` (`LegacyWebsiteIps`). **Deployed**, unlike the car show's reference-only copy | none |
+| [`a_DNS_base.yaml`](templates/a_DNS_base.yaml) | Route53 hosted zone for `missionmenofanna.com` with the records the domain has at GoDaddy today: Microsoft 365 (MX, verification + SPF TXT, `autodiscover` / `email` / `msoid` CNAMEs), Teams (`lyncdiscover` / `sip` CNAMEs, two SRVs), GoDaddy Payments (`pay` CNAME) and, until cutover, the old GoDaddy site at the apex + `www` (`LegacyWebsiteIps`). **Deployed**, unlike the car show's reference-only copy | none |
 | [`b_certificates.yaml`](templates/b_certificates.yaml) | One ACM certificate, `missionmenofanna.com` + SAN `www.missionmenofanna.com`, DNS-validated in the zone; exports `mmoa-certificate-arn` | `a_DNS_base` **and** the nameserver switch |
 | [`b_SES.yaml`](templates/b_SES.yaml) | SES domain identity (Easy DKIM, RSA 2048), MAIL FROM `mail.missionmenofanna.com`, and its records: 3 DKIM CNAMEs, MAIL FROM MX + SPF, `_dmarc` (`p=none`) | `a_DNS_base` **and** the nameserver switch |
 | [`b_network.yaml`](templates/b_network.yaml) | Small VPC `10.1.0.0/24`, 2 public + 2 private `/26` subnets across `us-east-1a/b`, IGW, single NAT Gateway in AZ1, route tables | none |

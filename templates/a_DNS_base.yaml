@@ -5,6 +5,7 @@ Description: >
     working when the nameservers move: Microsoft 365 (MX, verification +
     SPF TXT, autodiscover / email / msoid CNAMEs) and Teams (lyncdiscover /
     sip CNAMEs, two SRVs)
+  - GoDaddy Payments pay links (pay CNAME)
   - Optionally keeps the old GoDaddy Website Builder site answering at the
     apex and www until the web app takes over (LegacyWebsiteIps)
   - DNS registrar is GoDaddy (until the registration is transferred)
@@ -17,8 +18,9 @@ Description: >
 # HostedZoneId output of this stack into them.
 #
 # Defaults = what public DNS showed for missionmenofanna.com on 2026-10-26
-# (nameservers ns13/ns14.domaincontrol.com). Every record parameter is
-# optional: leave one blank and its record is not created.
+# (nameservers ns13/ns14.domaincontrol.com), checked against GoDaddy's own
+# DNS records list on 2026-10-27. Every record parameter is optional: leave
+# one blank and its record is not created.
 #
 # Not carried over: _domainconnect (GoDaddy's own "Domain Connect" helper —
 # meaningless once DNS is in Route53). No CAA record exists today, which
@@ -73,6 +75,10 @@ Metadata:
           - SipTlsSrvValue
           - SipFederationTlsSrvValue
       - Label:
+          default: GoDaddy services (blank = not created)
+        Parameters:
+          - PayCnameValue
+      - Label:
           default: Old GoDaddy website (blank once the web app takes over)
         Parameters:
           - LegacyWebsiteIps
@@ -103,6 +109,8 @@ Metadata:
         default: _sip._tls SRV value (priority weight port target)
       SipFederationTlsSrvValue:
         default: _sipfederationtls._tcp SRV value (priority weight port target)
+      PayCnameValue:
+        default: pay CNAME target (GoDaddy Payments pay links)
       LegacyWebsiteIps:
         default: Apex A record IPs for the old GoDaddy site (comma-separated)
 
@@ -188,6 +196,17 @@ Parameters:
     Default: 100 1 5061 sipfed.online.lync.com.
     Description: Value of the _sipfederationtls._tcp SRV record ("priority weight port target."). Blank = no record.
 
+  # ---------- GoDaddy services ----------
+  PayCnameValue:
+    Type: String
+    Default: paylinks.commerce.godaddy.com.
+    Description: >
+      Target of the pay CNAME (pay.<domain>) that GoDaddy Payments uses for
+      pay links (with trailing dot). Carried over as-is; on 2026-10-27 it
+      resolved but its https certificate did not validate, so it looks
+      unused — blank it if MMoA doesn't use GoDaddy pay links. Blank = no
+      record.
+
   # ---------- Old GoDaddy Website Builder site ----------
   LegacyWebsiteIps:
     Type: CommaDelimitedList
@@ -213,6 +232,7 @@ Conditions:
   HasSip: !Not [!Equals [!Ref SipCnameValue, '']]
   HasSipTlsSrv: !Not [!Equals [!Ref SipTlsSrvValue, '']]
   HasSipFederationSrv: !Not [!Equals [!Ref SipFederationTlsSrvValue, '']]
+  HasPay: !Not [!Equals [!Ref PayCnameValue, '']]
   HasLegacyWebsite: !Not [!Equals [!Join ['', !Ref LegacyWebsiteIps], '']]
 
 Resources:
@@ -336,6 +356,18 @@ Resources:
       TTL: !Ref DefaultTtl
       ResourceRecords:
         - !Ref SipFederationTlsSrvValue
+
+  # ---------- pay CNAME (GoDaddy Payments pay links) ----------
+  PayCnameRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasPay
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub pay.${DomainName}
+      Type: CNAME
+      TTL: !Ref DefaultTtl
+      ResourceRecords:
+        - !Ref PayCnameValue
 
   # ---------- Old GoDaddy website (until cutover) ----------
   # Keeps today's site answering while DNS moves, the certificate validates
