@@ -94,7 +94,7 @@ depend on each other.
 
 | File | What it provisions | Depends on |
 |------|--------------------|------------|
-| [`a_DNS_base.yaml`](templates/a_DNS_base.yaml) | Route53 hosted zone for `missionmenofanna.com` with the records the domain has at GoDaddy today: Microsoft 365 (MX, verification + SPF TXT, `autodiscover` / `email` / `msoid` CNAMEs), Teams (`lyncdiscover` / `sip` CNAMEs, two SRVs), GoDaddy Payments (`pay` CNAME) and, until cutover, the old GoDaddy site at the apex + `www` (`LegacyWebsiteIps`). **Deployed**, unlike the car show's reference-only copy | none |
+| [`a_DNS_base.yaml`](templates/a_DNS_base.yaml) | Route53 hosted zone for `missionmenofanna.com` with the records the domain has at GoDaddy today: Microsoft 365 (MX, verification + SPF TXT, `autodiscover` / `email` / `msoid` CNAMEs), Teams (`lyncdiscover` / `sip` CNAMEs, two SRVs), GoDaddy Payments (`pay` CNAME). The old GoDaddy site is not carried over (optional `LegacyWebsiteIps`). **Deployed**, unlike the car show's reference-only copy | none |
 | [`b_certificates.yaml`](templates/b_certificates.yaml) | One ACM certificate, `missionmenofanna.com` + SAN `www.missionmenofanna.com`, DNS-validated in the zone; exports `mmoa-certificate-arn` | `a_DNS_base` **and** the nameserver switch |
 | [`b_SES.yaml`](templates/b_SES.yaml) | SES domain identity (Easy DKIM, RSA 2048), MAIL FROM `mail.missionmenofanna.com`, and its records: 3 DKIM CNAMEs, MAIL FROM MX + SPF, `_dmarc` (`p=none`) | `a_DNS_base` **and** the nameserver switch |
 | [`b_network.yaml`](templates/b_network.yaml) | Small VPC `10.1.0.0/24`, 2 public + 2 private `/26` subnets across `us-east-1a/b`, IGW, single NAT Gateway in AZ1, route tables | none |
@@ -102,7 +102,7 @@ depend on each other.
 | [`c_security_groups.yaml`](templates/c_security_groups.yaml) | Web app SG `mmoa_ec2_web_app_sg` (self-ingress on `AppPort`) and ALB SG `mmoa_alb_inbound_sg` (80/443 from `0.0.0.0/0`) | `b_network` |
 | [`d_EC2_web_app.yaml`](templates/d_EC2_web_app.yaml) | `mmoa_web_app`: single `t3.small` AL2023 instance, `8 GiB gp3` root, private subnet 1, SSM-managed. User data clones + configures + starts the app, installs `mmoa-web-app.service` (restart on reboot) and `mmoa-web-app-backup.timer` (daily SQLite snapshot) | `b_IAM`, `b_network`, `c_security_groups` |
 | [`e_ALB_mmoa.yaml`](templates/e_ALB_mmoa.yaml) | `mmoa-webapp-alb` + HTTP:80 listener **forwarding** to `mmoa-webapp-tg`, which registers the instance on `AppPort` (`/health` check). HTTPS :443 not added yet | `b_network`, `c_security_groups`, `d_EC2_web_app` |
-| [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB. **The cutover**: deploy last, after HTTPS works | `a_DNS_base` (legacy records removed), `e_ALB_mmoa` |
+| [`f_DNS_Records.yaml`](templates/f_DNS_Records.yaml) | Apex + `www` A-alias records → the ALB | `a_DNS_base`, `e_ALB_mmoa` |
 
 `b_certificates`, `b_SES` and `f_DNS_Records` take the zone as a
 `HostedZoneId` **parameter** (the `HostedZoneId` output of `a_DNS_base`), the
@@ -321,30 +321,36 @@ are the durable copy.**
 
 ## Domain, HTTPS and email (missionmenofanna.com)
 
-The domain is registered at GoDaddy and today serves a GoDaddy Website
-Builder site plus Microsoft 365 email. The move keeps email working the
-whole time and switches the site over only once HTTPS is ready.
+The domain is registered at GoDaddy, which today also serves a Website
+Builder site and Microsoft 365 email. The move keeps email working the whole
+time. The old Website Builder site is **not** carried over (decided
+2026-10-27): the domain goes straight to the web app.
 
-**Why that order matters:** the old site sends
+**HTTPS note:** the old site sends
 `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`.
-Any browser that has visited it will load this domain **only over https**
-for up to two years (the domain is not on the browsers' preload list, so it
-only affects past visitors). Pointing the domain at an http-only ALB would
-look broken to them.
+Browsers that visited it will load this domain **only over https** for up to
+two years (the domain is not on the browsers' preload list, so this only
+affects past visitors). For them the new site works once step 5 is done.
 
-1. **Zone.** Deploy `a_DNS_base` with its defaults. The new zone answers
-   exactly like GoDaddy does today (email records + the old site).
+1. **Zone.** Deploy `a_DNS_base` with its defaults (email, Teams and `pay`
+   records; no website records).
    ```bash
    aws cloudformation deploy --stack-name mmoa-dns-base --template-file a_DNS_base.yaml
    aws cloudformation describe-stacks --stack-name mmoa-dns-base \
      --query "Stacks[0].Outputs" --output table   # HostedZoneId + HostedZoneNameServers
    ```
-2. **Nameservers.** At GoDaddy, replace the domain's nameservers with the four
+2. **Site records.** Deploy `f_DNS_Records` (apex + `www` → the ALB). Safe
+   before the nameserver switch — nothing in the zone is live yet.
+   ```bash
+   aws cloudformation deploy --stack-name mmoa-dns-records --template-file f_DNS_Records.yaml \
+     --parameter-overrides HostedZoneId=<zone id>
+   ```
+3. **Nameservers.** At GoDaddy, replace the domain's nameservers with the four
    `HostedZoneNameServers`. Wait until `dig NS missionmenofanna.com` shows the
-   `awsdns-*` servers (minutes to 48 hours). Email and the old site keep
-   working throughout. Transferring the *registration* away from GoDaddy is
-   separate and can happen any time later.
-3. **Certificate and SES** (both need step 2 live):
+   `awsdns-*` servers (minutes to 48 hours). Email keeps working throughout.
+   Transferring the *registration* away from GoDaddy is separate and can
+   happen any time later.
+4. **Certificate and SES** (both need step 3 live):
    ```bash
    aws cloudformation deploy --stack-name mmoa-certificates --template-file b_certificates.yaml \
      --parameter-overrides HostedZoneId=<zone id>
@@ -353,21 +359,10 @@ look broken to them.
    ```
    The certificate stack waits until ACM validates (a few minutes once DNS
    has moved).
-4. **HTTPS on the ALB.** In `e_ALB_mmoa`, add a 443 listener with the
+5. **HTTPS on the ALB.** In `e_ALB_mmoa`, add a 443 listener with the
    certificate (`Fn::ImportValue: mmoa-certificate-arn`) forwarding to the
    target group, and change the :80 listener to a 301 redirect to HTTPS.
-   The ALB SG already allows 443. Check `https://<LoadBalancerDnsName>` answers
-   (the browser will warn that the name doesn't match the certificate —
-   expected until step 5).
-5. **Cutover.** Update `a_DNS_base` with `LegacyWebsiteIps` **blank** (removes
-   the old site's apex A and `www` CNAME), then immediately deploy
-   `f_DNS_Records` (apex + `www` → the ALB):
-   ```bash
-   aws cloudformation deploy --stack-name mmoa-dns-base --template-file a_DNS_base.yaml \
-     --parameter-overrides LegacyWebsiteIps=""
-   aws cloudformation deploy --stack-name mmoa-dns-records --template-file f_DNS_Records.yaml \
-     --parameter-overrides HostedZoneId=<zone id>
-   ```
+   The ALB SG already allows 443.
 6. **App settings** (Admin Console → Web App Settings), then restart:
    `publicBaseUrl` = `https://missionmenofanna.com` (links in emails and the
    Facebook / Open Graph share tags). Refresh an event link once in
@@ -380,6 +375,10 @@ look broken to them.
    Then set `email.transport` = `ses`, `email.from` = e.g.
    `noreply@missionmenofanna.com`, restart, send yourself a password reset —
    and once it arrives, turn **`email.showLinksInBrowser` off**.
+
+To keep the old site answering during the move instead, deploy `a_DNS_base`
+with `LegacyWebsiteIps=13.248.243.5,76.223.105.230`, skip step 2, and after
+step 5 blank `LegacyWebsiteIps` and deploy `f_DNS_Records`.
 
 Not carried over from GoDaddy: `_domainconnect` (GoDaddy's own helper).
 There is no CAA record, which lets ACM issue the certificate. SES owns the

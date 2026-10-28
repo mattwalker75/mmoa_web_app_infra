@@ -6,8 +6,9 @@ Description: >
     SPF TXT, autodiscover / email / msoid CNAMEs) and Teams (lyncdiscover /
     sip CNAMEs, two SRVs)
   - GoDaddy Payments pay links (pay CNAME)
-  - Optionally keeps the old GoDaddy Website Builder site answering at the
-    apex and www until the web app takes over (LegacyWebsiteIps)
+  - The old GoDaddy Website Builder site is NOT carried over by default
+    (LegacyWebsiteIps blank); f_DNS_Records points the apex and www at the
+    web app ALB instead
   - DNS registrar is GoDaddy (until the registration is transferred)
 
 # ---------------------------------------------------------------------------
@@ -26,19 +27,26 @@ Description: >
 # meaningless once DNS is in Route53). No CAA record exists today, which
 # lets ACM issue the certificate.
 #
-# CUTOVER ORDER (see README → "Domain, HTTPS and email"):
-#   1. Deploy this stack with the defaults (LegacyWebsiteIps set). The new
-#      zone answers exactly like GoDaddy does today.
-#   2. At GoDaddy, replace the nameservers with the 4 in the
-#      HostedZoneNameServers output. Email and the old site keep working
-#      through the switch. Propagation: minutes to 48 hours.
-#   3. Deploy b_certificates (validates through this zone) and b_SES, add
-#      the HTTPS listener to e_ALB_mmoa.
-#   4. Update THIS stack with LegacyWebsiteIps blank (removes the apex A and
-#      www CNAME), then deploy f_DNS_Records straight away (apex + www →
-#      the ALB). Step 4 must come after HTTPS works: the old site sends a
-#      2-year HSTS header (includeSubDomains), so browsers that visited it
-#      will only ever load this domain over https.
+# ORDER (see README → "Domain, HTTPS and email"):
+#   1. Deploy this stack with the defaults. The new zone answers like
+#      GoDaddy does today for email, Teams and pay links — but NOT for the
+#      website: the old GoDaddy Website Builder site is dropped (Matt's call,
+#      2026-10-27), so the apex and www have no records here.
+#   2. Deploy f_DNS_Records (apex + www → the web app ALB). It can go in
+#      before the nameserver switch; records in this zone don't take effect
+#      until step 3.
+#   3. At GoDaddy, replace the nameservers with the 4 in the
+#      HostedZoneNameServers output. Email keeps working through the
+#      switch; the site becomes the web app (http until step 4).
+#      Propagation: minutes to 48 hours.
+#   4. Deploy b_certificates (validates through this zone) and b_SES, then
+#      add the HTTPS listener to e_ALB_mmoa. Until this is done, browsers
+#      that visited the OLD site can't open the new one: that site sent a
+#      2-year HSTS header (includeSubDomains), so they insist on https.
+#
+# To keep the old site answering during the move instead, set
+# LegacyWebsiteIps to 13.248.243.5,76.223.105.230 and deploy f_DNS_Records
+# only after HTTPS works (blank LegacyWebsiteIps first).
 #
 # NOTE: After this stack creates the hosted zone, AWS generates 4 Name Server
 # (NS) records. Copy those into the domain registrar so the registrar
@@ -79,7 +87,7 @@ Metadata:
         Parameters:
           - PayCnameValue
       - Label:
-          default: Old GoDaddy website (blank once the web app takes over)
+          default: Old GoDaddy website (normally blank)
         Parameters:
           - LegacyWebsiteIps
     ParameterLabels:
@@ -210,15 +218,14 @@ Parameters:
   # ---------- Old GoDaddy Website Builder site ----------
   LegacyWebsiteIps:
     Type: CommaDelimitedList
-    Default: 13.248.243.5,76.223.105.230
+    Default: ''
     Description: >
-      IPv4 addresses the apex points at today (GoDaddy Website Builder). While
-      set, this stack keeps the old site answering at the apex and www
-      (www = CNAME to the apex, as at GoDaddy). Set it BLANK at cutover — that
-      removes both records — and then deploy f_DNS_Records, which points the
-      apex and www at the web app ALB. (Route53 can't hold the old records and
-      f_DNS_Records' aliases at the same time; f_DNS_Records fails cleanly if
-      these still exist.)
+      Blank (the default) = the old GoDaddy Website Builder site is not
+      carried over; f_DNS_Records owns the apex and www. Only if you want the
+      old site to keep answering during the move: set it to the IPs GoDaddy
+      used (13.248.243.5,76.223.105.230) — that adds an apex A and a www CNAME
+      — and blank it again before deploying f_DNS_Records (Route53 can't hold
+      both; f_DNS_Records fails cleanly if these still exist).
 
 Conditions:
   HasMx: !Not [!Equals [!Ref MxRecordValue, '']]
@@ -369,7 +376,7 @@ Resources:
       ResourceRecords:
         - !Ref PayCnameValue
 
-  # ---------- Old GoDaddy website (until cutover) ----------
+  # ---------- Old GoDaddy website (optional, off by default) ----------
   # Keeps today's site answering while DNS moves, the certificate validates
   # and HTTPS is added to the ALB. Removed by setting LegacyWebsiteIps blank;
   # f_DNS_Records then owns the apex and www.

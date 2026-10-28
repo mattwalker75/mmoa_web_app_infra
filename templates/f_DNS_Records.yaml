@@ -2,20 +2,23 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   mmoa - Route53 DNS records
   - missionmenofanna.com and www.missionmenofanna.com -> the web app ALB
+  - Deploy right after a_DNS_base (no old site to replace)
 
 # ---------------------------------------------------------------------------
-# DEPLOY THIS LAST — it is the cutover from the old GoDaddy site to the app.
+# Points missionmenofanna.com and www at the web app ALB.
 # ---------------------------------------------------------------------------
-# Before deploying:
-#   1. HTTPS must already work on the ALB (b_certificates + the :443 listener
-#      on e_ALB_mmoa). The old GoDaddy site sends a 2-year HSTS header with
-#      includeSubDomains, so every browser that visited it will only load
-#      this domain over https — pointing the domain at an http-only ALB
-#      would look broken to them.
-#   2. Update a_DNS_base with LegacyWebsiteIps BLANK. That deletes its apex A
-#      and www CNAME; Route53 can't hold those and these aliases at the same
-#      name, so this stack fails cleanly ("already exists") if you skip it.
-#      Deploy this stack right after, to keep the gap to a minute or two.
+# a_DNS_base no longer carries the old GoDaddy site by default, so this stack
+# can be deployed right after a_DNS_base — even before the GoDaddy
+# nameserver switch (records in the zone don't take effect until then).
+#
+# HTTPS: the old GoDaddy site sent a 2-year HSTS header (includeSubDomains).
+# Browsers that visited it will only load this domain over https, so for
+# them the site works once b_certificates + the :443 listener on e_ALB_mmoa
+# are in place; everyone else can use http until then.
+#
+# If a_DNS_base was deployed with LegacyWebsiteIps set (old site kept), blank
+# it first: Route53 can't hold those records and these aliases at the same
+# name, so this stack fails cleanly ("already exists") otherwise.
 # After deploying: set the web app's publicBaseUrl to
 # https://missionmenofanna.com (Admin Console → Web App Settings) and
 # restart, so links in emails and the Open Graph / Facebook share tags use
