@@ -116,7 +116,11 @@ Parameters:
 
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
+    Default: Z04038972KU26BM2E7UHW
     Description: >
+      The default is the ID of the missionmenofanna.com zone the a_DNS_base
+      stack created (2026-10-27). If the zone is ever recreated, use the new
+      HostedZoneId output of a_DNS_base.
       ID of the Route53 public hosted zone for the domain — the HostedZoneId
       output of the a_DNS_base stack. The DKIM, MAIL FROM, and DMARC records
       are published into this zone.
